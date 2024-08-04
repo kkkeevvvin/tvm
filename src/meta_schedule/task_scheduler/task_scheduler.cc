@@ -312,6 +312,12 @@ void TaskSchedulerNode::PrintTuningStatistics() {
      << "\nTotal latency (us): " << total_latency  //
      << "\n";
 
+  if (total_latency < this->min_latency) {
+    TVM_PY_LOG(INFO, this->logger) << "[kevin] update the best trial\n";
+    this->best_trial = total_trials;
+    this->min_latency = total_latency;
+  }
+
   if (using_ipython()) {
     print_interactive_table(p.AsStr());
     std::cout << os.str() << std::endl << std::flush;

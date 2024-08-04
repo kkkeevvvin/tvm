@@ -33,6 +33,7 @@
 
 #include <string>
 #include <vector>
+#include <cfloat> /* [kevin] */
 
 namespace tvm {
 namespace meta_schedule {
@@ -142,6 +143,11 @@ class TaskSchedulerNode : public runtime::Object {
 
   /*! \brief The default destructor. */
   virtual ~TaskSchedulerNode() = default;
+
+  /*! [kevin] \brief The minimum total latency */
+  double min_latency = DBL_MAX;
+  /*! [kevin] \brief The number of trials to min_latency */
+  int best_trial = 0;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
     // `logger` is not visited
