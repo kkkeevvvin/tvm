@@ -19,7 +19,7 @@
 
 /*!
  * \file src/relax/transform/fuse_ops_dnnfusion.cc
- * \brief DNNFusion-style operator fusion for Relax (Phase 1, M1 stage).
+ * \brief DNNFusion-style operator fusion for Relax (Phase 1, M1 + M2 stage).
  *
  * Phase 1 / M1 scope (per dnnfusion_fuse_ops_plan.md, Step 1+2):
  *   - Derive DNNFusion mapping type (OtO / OtM / MtM / Reorg / Shuffle / break)
@@ -31,9 +31,21 @@
  *     the derivation table and the seed-order computation against hand-checked
  *     ground truth on ResNet50 / BERT.
  *
- * The Phase 1 main partitioning loop (Step 3-5, fuse_depend rejection,
- * try-lower fuse_through validation, bidirectional expansion) lands in M2-M4
- * and is intentionally absent here.
+ * Phase 1 / M2 scope (per dnnfusion_fuse_ops_plan.md, Step 3):
+ *   - Encode the 5x5 mapping matrix from the DNNFusion paper Table 3 as
+ *     FuseRelation MappingCheck(producer, consumer).
+ *   - Phase 1 decision wrapper: kThru -> accept, kDep / kBreak -> reject.
+ *     The kDep branch is rejected outright in Phase 1; Phase 2 will reroute it
+ *     through a profile-based latency oracle.
+ *   - Expose two more FFI hooks: a per-pair query for unit-test coverage of
+ *     the full 25-cell matrix, and a per-edge dataflow walk that uses
+ *     BuildIndexedForwardGraph (exported from fuse_ops.cc) so the M2
+ *     acceptance criterion ("dump every edge with its mapping check result")
+ *     is satisfiable on real models.
+ *
+ * The Phase 1 main partitioning loop (Step 4-5, try-lower fuse_through
+ * validation, bidirectional expansion) lands in M3-M4 and is intentionally
+ * absent here.
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -48,8 +60,13 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "../../support/arena.h"
+#include "../analysis/graph_partitioner.h"
+#include "utils.h"
 
 namespace tvm {
 namespace relax {
@@ -83,6 +100,78 @@ const char* MappingTypeToString(MappingType m) {
       return "break";
   }
   return "<unknown>";
+}
+
+// ---------------------------------------------------------------------------
+// FuseRelation: 5x5 mapping matrix (paper Table 3)
+// ---------------------------------------------------------------------------
+
+// One entry per (producer_mapping_type, consumer_mapping_type) cell of the
+// DNNFusion matrix.
+//
+//   kThru  : safe to fuse purely from a mapping-type standpoint. Step 4
+//            (try-lower) still gets to veto.
+//   kDep   : fusion is profitability-dependent. Phase 1 rejects unconditionally;
+//            Phase 2 routes this through a profile/cost oracle.
+//   kBreak : never fuse.
+enum class FuseRelation : int {
+  kThru = 0,
+  kDep = 1,
+  kBreak = 2,
+};
+
+const char* FuseRelationToString(FuseRelation r) {
+  switch (r) {
+    case FuseRelation::kThru:
+      return "thru";
+    case FuseRelation::kDep:
+      return "dep";
+    case FuseRelation::kBreak:
+      return "break";
+  }
+  return "<unknown>";
+}
+
+// Lookup the 5x5 mapping matrix from the DNNFusion paper Table 3.
+//
+//                 consumer
+//   producer  | OtO  | OtM  | MtM  | Reorg | Shuffle
+//   ----------+------+------+------+-------+--------
+//   OtO       | thru | thru | thru | thru  | break
+//   OtM       | thru | thru | dep  | dep   | break
+//   MtM       | thru | dep  | dep  | dep   | break
+//   Reorg     | thru | thru | dep  | thru  | break
+//   Shuffle   | dep  | break| break| break | break
+//
+// Either side being kBreak (i.e., the op was not classified) collapses to
+// kBreak: we never invent a fusion across an unknown boundary.
+FuseRelation MappingCheck(MappingType producer, MappingType consumer) {
+  if (producer == MappingType::kBreak || consumer == MappingType::kBreak) {
+    return FuseRelation::kBreak;
+  }
+  // Indexed by [producer][consumer] over {OtO, OtM, MtM, Reorg, Shuffle} = 0..4.
+  static constexpr FuseRelation kTable[5][5] = {
+      // consumer:  OtO,             OtM,             MtM,             Reorg,           Shuffle
+      /* OtO     */ {FuseRelation::kThru, FuseRelation::kThru, FuseRelation::kThru,
+                    FuseRelation::kThru, FuseRelation::kBreak},
+      /* OtM     */ {FuseRelation::kThru, FuseRelation::kThru, FuseRelation::kDep,
+                    FuseRelation::kDep, FuseRelation::kBreak},
+      /* MtM     */ {FuseRelation::kThru, FuseRelation::kDep, FuseRelation::kDep,
+                    FuseRelation::kDep, FuseRelation::kBreak},
+      /* Reorg   */ {FuseRelation::kThru, FuseRelation::kThru, FuseRelation::kDep,
+                    FuseRelation::kThru, FuseRelation::kBreak},
+      /* Shuffle */ {FuseRelation::kDep, FuseRelation::kBreak, FuseRelation::kBreak,
+                    FuseRelation::kBreak, FuseRelation::kBreak},
+  };
+  return kTable[static_cast<int>(producer)][static_cast<int>(consumer)];
+}
+
+// Phase 1 fuse decision per the plan (§4.3 Step 3): kThru -> accept,
+// everything else -> reject. The kDep branch is the one that requires the
+// Phase 2 latency oracle, so it is *intentionally* rejected here even though
+// the paper would profile it.
+bool Phase1AllowFusion(MappingType producer, MappingType consumer) {
+  return MappingCheck(producer, consumer) == FuseRelation::kThru;
 }
 
 // Phase 1 Shuffle whitelist. After LegalizeOps the high-level relax op identity
@@ -190,6 +279,11 @@ int64_t ComputeIRSBytes(const StructInfo& sinfo) {
 class DnnFusionAnalyzer : public ExprVisitor {
  public:
   struct Info {
+    // Pointer to the Var defined by this binding. Doubles as the key in the
+    // IndexedForwardGraph::node_map so the M2 edge walker can join graph nodes
+    // back to per-binding metadata. Null for synthetic rows that do not
+    // correspond to a binding.
+    const tvm::Object* ref{nullptr};
     std::string var_name;
     std::string callee_name;
     OpPatternKind op_pattern{kOpaque};
@@ -214,6 +308,7 @@ class DnnFusionAnalyzer : public ExprVisitor {
 
   void VisitBinding_(const VarBindingNode* binding) final {
     Info info;
+    info.ref = binding->var.get();
     info.var_name = binding->var->name_hint();
     if (const auto* call = binding->value.as<CallNode>()) {
       info.callee_name = ExtractCalleeName(call);
@@ -317,10 +412,124 @@ ffi::Array<ffi::Map<ffi::String, ffi::Any>> AnalyzeDnnFusionMappingTypes(IRModul
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// FFI hook: DnnFusionMappingCheck (per-pair query for unit tests)
+// ---------------------------------------------------------------------------
+
+// Pure lookup wrapper exposed so unit tests can verify all 25 cells of the
+// 5x5 mapping matrix end-to-end without needing to construct a Relax IR.
+// Inputs are the int values of MappingType (the Python side already has
+// DNNFUSION_MAPPING_TYPES tuple to convert names <-> ints).
+//
+// Returns: { relation:int, name:str, phase1_allow:bool }
+ffi::Map<ffi::String, ffi::Any> DnnFusionMappingCheckFFI(int producer_int, int consumer_int) {
+  // Validate against the inclusive enum range (kOtO=0 .. kBreak=5).
+  auto in_range = [](int v) {
+    return v >= static_cast<int>(MappingType::kOtO) && v <= static_cast<int>(MappingType::kBreak);
+  };
+  CHECK(in_range(producer_int))
+      << "DnnFusionMappingCheck: producer mapping type " << producer_int << " out of range";
+  CHECK(in_range(consumer_int))
+      << "DnnFusionMappingCheck: consumer mapping type " << consumer_int << " out of range";
+
+  auto producer = static_cast<MappingType>(producer_int);
+  auto consumer = static_cast<MappingType>(consumer_int);
+  FuseRelation rel = MappingCheck(producer, consumer);
+
+  ffi::Map<ffi::String, ffi::Any> out;
+  out.Set("relation", static_cast<int64_t>(rel));
+  out.Set("name", ffi::String(FuseRelationToString(rel)));
+  out.Set("phase1_allow", rel == FuseRelation::kThru);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// FFI hook: AnalyzeDnnFusionFuseEdges (per-edge dataflow walk)
+// ---------------------------------------------------------------------------
+
+// Walk every directed edge in the dataflow graph and report what the M4
+// partitioner main loop would see when it queries MappingCheck on that edge.
+//
+// Reuses BuildIndexedForwardGraph (exported from fuse_ops.cc, see
+// utils.h:162) so the per-edge view is the *same* graph the existing FuseOps
+// path operates on -- no parallel graph builder.
+//
+// Each output row corresponds to a single edge with keys:
+//   producer            : binding-var name_hint of the source node       (str)
+//   consumer            : binding-var name_hint of the sink node         (str)
+//   producer_pattern    : OpPatternKind on the source node               (int)
+//   consumer_pattern    : OpPatternKind on the sink node                 (int)
+//   producer_mapping    : MappingType of the source                      (int)
+//   producer_mapping_name : MappingType label (e.g. "MtM")               (str)
+//   consumer_mapping    : MappingType of the sink                        (int)
+//   consumer_mapping_name : MappingType label                            (str)
+//   relation            : FuseRelation int                                (int)
+//   relation_name       : FuseRelation label ("thru" / "dep" / "break")  (str)
+//   phase1_allow        : true iff Phase 1 would accept this edge        (bool)
+//
+// Edges where the producer is a function parameter (no Relax binding) are
+// included with producer_mapping=kBreak (we never fuse "across a parameter")
+// and producer="<param>" so the consumer's view is still complete.
+ffi::Array<ffi::Map<ffi::String, ffi::Any>> AnalyzeDnnFusionFuseEdges(IRModule mod) {
+  // Per-binding metadata indexed by Var* (the same Object* used as graph-node
+  // ref). Walks the IR once.
+  std::vector<DnnFusionAnalyzer::Info> rows = DnnFusionAnalyzer::Collect(mod);
+  std::unordered_map<const tvm::Object*, const DnnFusionAnalyzer::Info*> by_ref;
+  by_ref.reserve(rows.size());
+  for (const auto& info : rows) {
+    if (info.ref != nullptr) by_ref.emplace(info.ref, &info);
+  }
+
+  // Build the dataflow graph. Same arena lifetime as the call.
+  support::Arena arena;
+  IndexedForwardGraph graph = BuildIndexedForwardGraph(mod, &arena);
+
+  // For nodes without a Relax binding (i.e. parameters), surface a sentinel.
+  auto resolve = [&](const IndexedForwardGraph::Node* n)
+      -> std::pair<std::string, MappingType> {
+    auto it = by_ref.find(n->ref);
+    if (it == by_ref.end()) {
+      // Parameter or otherwise unmapped node. Default callee_name "" never
+      // hits the Shuffle whitelist, so DeriveMappingType -> kBreak.
+      return {std::string("<param>"), DeriveMappingType(n->pattern, "")};
+    }
+    return {it->second->var_name, DeriveMappingType(n->pattern, it->second->callee_name)};
+  };
+
+  ffi::Array<ffi::Map<ffi::String, ffi::Any>> out;
+  for (IndexedForwardGraph::Node* node : graph.post_dfs_order) {
+    if (node == nullptr) continue;
+    auto [producer_name, producer_mt] = resolve(node);
+    for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
+      const IndexedForwardGraph::Node* sink = link->value.node;
+      if (sink == nullptr) continue;
+      auto [consumer_name, consumer_mt] = resolve(sink);
+      FuseRelation rel = MappingCheck(producer_mt, consumer_mt);
+
+      ffi::Map<ffi::String, ffi::Any> row;
+      row.Set("producer", ffi::String(producer_name));
+      row.Set("consumer", ffi::String(consumer_name));
+      row.Set("producer_pattern", static_cast<int64_t>(node->pattern));
+      row.Set("consumer_pattern", static_cast<int64_t>(sink->pattern));
+      row.Set("producer_mapping", static_cast<int64_t>(producer_mt));
+      row.Set("producer_mapping_name", ffi::String(MappingTypeToString(producer_mt)));
+      row.Set("consumer_mapping", static_cast<int64_t>(consumer_mt));
+      row.Set("consumer_mapping_name", ffi::String(MappingTypeToString(consumer_mt)));
+      row.Set("relation", static_cast<int64_t>(rel));
+      row.Set("relation_name", ffi::String(FuseRelationToString(rel)));
+      row.Set("phase1_allow", rel == FuseRelation::kThru);
+      out.push_back(row);
+    }
+  }
+  return out;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("relax.transform.AnalyzeDnnFusionMappingTypes",
-                        AnalyzeDnnFusionMappingTypes);
+  refl::GlobalDef()
+      .def("relax.transform.AnalyzeDnnFusionMappingTypes", AnalyzeDnnFusionMappingTypes)
+      .def("relax.transform.DnnFusionMappingCheck", DnnFusionMappingCheckFFI)
+      .def("relax.transform.AnalyzeDnnFusionFuseEdges", AnalyzeDnnFusionFuseEdges);
 }
 
 }  // namespace relax

@@ -813,6 +813,10 @@ def FuseOps(fuse_opt_level=-1) -> tvm.ir.transform.Pass:
 # Phase 1 / M1 — see src/relax/transform/fuse_ops_dnnfusion.cc.
 DNNFUSION_MAPPING_TYPES = ("OtO", "OtM", "MtM", "Reorg", "Shuffle", "break")
 
+# DNNFusion fuse-relation labels, matching the C++ FuseRelation enum order.
+# Phase 1 / M2 — see src/relax/transform/fuse_ops_dnnfusion.cc.
+DNNFUSION_FUSE_RELATIONS = ("thru", "dep", "break")
+
 
 def analyze_dnnfusion_mapping_types(mod: tvm.IRModule) -> List[Dict[str, object]]:
     """Dump per-binding DNNFusion mapping-type info for inspection / unit tests.
@@ -841,6 +845,88 @@ def analyze_dnnfusion_mapping_types(mod: tvm.IRModule) -> List[Dict[str, object]
             is_seed_cand  bool  — True iff mapping_type == OtO and IRS is static
     """
     raw = _ffi_api.AnalyzeDnnFusionMappingTypes(mod)  # type: ignore
+    out: List[Dict[str, object]] = []
+    for row in raw:
+        out.append({k: row[k] for k in row})
+    return out
+
+
+def dnnfusion_mapping_check(producer, consumer) -> Dict[str, object]:
+    """Look up one cell of the DNNFusion 5x5 mapping matrix (paper Table 3).
+
+    Phase 1 / M2 helper. Takes either MappingType labels (strings from
+    ``DNNFUSION_MAPPING_TYPES``) or their integer enum values and returns the
+    fuse relation along with the Phase 1 accept/reject decision.
+
+    The producer/consumer arguments accept either form so tests can stay
+    readable (``"OtO"``, ``"MtM"``, ...) without leaking enum integers.
+
+    Parameters
+    ----------
+    producer, consumer : str or int
+        Mapping type for the producer / consumer node. Strings must be
+        members of ``DNNFUSION_MAPPING_TYPES``; ints are taken as the
+        underlying enum value.
+
+    Returns
+    -------
+    dict with keys::
+
+        relation     int   — FuseRelation enum value (0..2)
+        name         str   — relation label, see DNNFUSION_FUSE_RELATIONS
+        phase1_allow bool  — True iff Phase 1 would accept this fusion
+                              (i.e. relation == "thru"). Phase 1 rejects
+                              "dep" outright; that branch waits for the
+                              Phase 2 latency oracle.
+    """
+
+    def _norm(x):
+        if isinstance(x, str):
+            try:
+                return DNNFUSION_MAPPING_TYPES.index(x)
+            except ValueError as e:
+                raise ValueError(
+                    f"unknown mapping type {x!r}; expected one of {DNNFUSION_MAPPING_TYPES}"
+                ) from e
+        return int(x)
+
+    raw = _ffi_api.DnnFusionMappingCheck(_norm(producer), _norm(consumer))  # type: ignore
+    return {k: raw[k] for k in raw}
+
+
+def analyze_dnnfusion_fuse_edges(mod: tvm.IRModule) -> List[Dict[str, object]]:
+    """Dump per-edge DNNFusion mapping-check info for inspection / unit tests.
+
+    Phase 1 / M2 helper. Walks every directed edge in the dataflow graph that
+    ``BuildIndexedForwardGraph`` produces (the same graph the existing
+    ``FuseOps`` pass uses), and reports the producer / consumer mapping types
+    and the FuseRelation for each edge. Use this to satisfy the M2 acceptance
+    criterion of "list every edge with its mapping check result on a real
+    model" (see plan §4.5).
+
+    Parameters
+    ----------
+    mod : tvm.IRModule
+        A Relax IRModule, typically post-LegalizeOps + AnnotateTIROpPattern.
+
+    Returns
+    -------
+    rows : list of dict
+        One dict per edge, with keys::
+
+            producer              str  — source binding name (or "<param>")
+            consumer              str  — sink binding name
+            producer_pattern      int  — source OpPatternKind
+            consumer_pattern      int  — sink OpPatternKind
+            producer_mapping      int  — source MappingType
+            producer_mapping_name str  — source MappingType label
+            consumer_mapping      int  — sink MappingType
+            consumer_mapping_name str  — sink MappingType label
+            relation              int  — FuseRelation
+            relation_name         str  — relation label, see DNNFUSION_FUSE_RELATIONS
+            phase1_allow          bool — True iff Phase 1 would accept this edge
+    """
+    raw = _ffi_api.AnalyzeDnnFusionFuseEdges(mod)  # type: ignore
     out: List[Dict[str, object]] = []
     for row in raw:
         out.append({k: row[k] for k in row})

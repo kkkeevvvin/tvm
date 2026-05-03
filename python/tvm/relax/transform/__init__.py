@@ -32,6 +32,7 @@ from .transform import (
     ComputePrimValue,
     ConvertLayout,
     ConvertToDataflow,
+    DNNFUSION_FUSE_RELATIONS,
     DNNFUSION_MAPPING_TYPES,
     DataflowBlockPass,
     DataflowUseInplaceCalls,
@@ -85,8 +86,10 @@ from .transform import (
     VMBuiltinLower,
     VMShapeLower,
     SpecializePrimFuncBasedOnCallSite,
+    analyze_dnnfusion_fuse_edges,
     analyze_dnnfusion_mapping_types,
     dataflowblock_pass,
+    dnnfusion_mapping_check,
     function_pass,
 )
 
