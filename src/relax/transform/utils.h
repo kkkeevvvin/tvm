@@ -146,6 +146,22 @@ IRModule MakeGroupedFunctions(
     bool lift_constants = true, const ffi::Array<ffi::String>& entry_function_names = {});
 
 /*!
+ * \brief Build an IndexedForwardGraph for fusion analysis from the given IRModule.
+ *
+ * Thin wrapper around the GraphCreator inside fuse_ops.cc, exposed so that
+ * sibling fusion passes (e.g. FuseOpsByDNNFusion) can reuse the same dataflow
+ * graph construction without depending on translation-unit-internal classes.
+ * Functions carrying attr::kPrimitive or attr::kCodegen are skipped, matching
+ * the behavior used by FuseOps.
+ *
+ * \param mod The input module.
+ * \param arena The arena used to allocate the graph nodes; must outlive the
+ *              returned graph.
+ * \return The constructed IndexedForwardGraph.
+ */
+IndexedForwardGraph BuildIndexedForwardGraph(IRModule mod, support::Arena* arena);
+
+/*!
  * \brief Check if the given StructInfo is a scalar tensor. The sinfo should be an instance of
  * TensorStructInfo; its shape must be ShapeExpr.
  * \param sinfo The StructInfo to be checked.

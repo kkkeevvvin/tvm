@@ -1059,6 +1059,10 @@ IRModule MakeGroupedFunctions(
   return OperatorFusor(mod, partition, lift_constants).Transform(entry_function_names);
 }
 
+IndexedForwardGraph BuildIndexedForwardGraph(IRModule mod, support::Arena* arena) {
+  return GraphCreator::Create(std::move(mod), arena);
+}
+
 /*! \brief Create a "partitioning", a map from interior / leaf expr to its representative group,
  * based on the provided pattern. The result can be passed to OperatorFusor above to fuse operations
  * in a group and create a grouped function.
