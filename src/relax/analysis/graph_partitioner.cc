@@ -19,7 +19,13 @@
 
 #include "./graph_partitioner.h"
 
+#include <tvm/ir/transform.h>
+
+#include <numeric>
+#include <string>
 #include <vector>
+
+#include "./dnnfusion_seed.h"
 
 namespace tvm {
 namespace relax {
@@ -202,6 +208,10 @@ void GraphPartitioner::CommitFuse(IndexedForwardGraph::Node* src, IndexedForward
   visited_.clear();
   ICHECK(src != sink);
   CommitFuse_(src, sink, target);
+  // Trace one row per top-level CommitFuse (recursive CommitFuse_ calls do not
+  // emit). When the call was deferred via postpone_node_, target->FindRoot() is
+  // still well-defined; the row reflects the post-merge group size.
+  RecordFuseTrace(current_phase_, src->index, sink->index, target->FindRoot()->num_nodes);
 }
 
 size_t GraphPartitioner::CountNodesUptoSink_(IndexedForwardGraph::Node* src,
@@ -324,7 +334,27 @@ void GraphPartitioner::InitGroups(const IndexedForwardGraph& graph) {
 void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
                                const DominatorTree& post_dom_tree,  //
                                int phase) {
-  for (size_t nid = 0; nid < groups_.size(); ++nid) {
+  current_phase_ = phase;
+
+  // exp2: select the outer-loop iteration order. Default ("topological") is
+  // bit-identical to v0.23.0; "dnnfusion_seed" routes through ComputeSeedOrder.
+  // The fusion decision below (3 phase if/else cascade, CheckPath, threshold
+  // checks) is unchanged.
+  std::vector<size_t> order;
+  std::string order_mode = "topological";
+  if (auto pc = transform::PassContext::Current(); pc.defined()) {
+    auto opt =
+        pc->GetConfig<ffi::String>("relax.FuseOps.iteration_order", ffi::String("topological"));
+    if (opt.has_value()) order_mode = std::string(opt.value());
+  }
+  if (order_mode == "dnnfusion_seed") {
+    order = ComputeSeedOrder(graph);
+  } else {
+    order.resize(groups_.size());
+    std::iota(order.begin(), order.end(), 0);
+  }
+
+  for (size_t nid : order) {
     // the group of current node has been specified already.
     auto* graph_node = graph.post_dfs_order[nid];
     auto* dom_node = post_dom_tree.nodes[nid];

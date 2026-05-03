@@ -98,6 +98,10 @@ using support::LinkNode;
 constexpr uint32_t kMaxFusedOps = 256;
 
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.max_depth", Integer);
+// exp2: outer-loop iteration order in GraphPartitioner::RunFuse.
+//   "topological"     (default) - bit-identical to v0.23.0
+//   "dnnfusion_seed"            - OtO seeds first, smallest IRS first
+TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.iteration_order", ffi::String);
 
 class GraphCreator : public ExprVisitor {
  public:

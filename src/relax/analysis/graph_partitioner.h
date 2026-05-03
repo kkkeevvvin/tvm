@@ -229,6 +229,8 @@ class GraphPartitioner {
    *        the generated function.
    */
   const IndexedForwardGraph::Node* postpone_node_{nullptr};
+  /*! \brief Phase tag attached to each FuseOps trace row (exp2 Step 4). */
+  int current_phase_{0};
   // Internal implementation of CheckPath
   template <typename F>
   bool CheckPath_(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink, F fcond);
