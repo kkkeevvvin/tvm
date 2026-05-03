@@ -809,6 +809,44 @@ def FuseOps(fuse_opt_level=-1) -> tvm.ir.transform.Pass:
     return _ffi_api.FuseOps(fuse_opt_level)  # type: ignore
 
 
+# DNNFusion mapping-type labels, matching the C++ MappingType enum order.
+# Phase 1 / M1 — see src/relax/transform/fuse_ops_dnnfusion.cc.
+DNNFUSION_MAPPING_TYPES = ("OtO", "OtM", "MtM", "Reorg", "Shuffle", "break")
+
+
+def analyze_dnnfusion_mapping_types(mod: tvm.IRModule) -> List[Dict[str, object]]:
+    """Dump per-binding DNNFusion mapping-type info for inspection / unit tests.
+
+    Phase 1 / M1 helper. Walks each non-primitive Relax function in the module
+    and, for every binding it discovers, returns the OpPatternKind, derived
+    DNNFusion mapping type, and IRS (intermediate-result size) in bytes.
+
+    Parameters
+    ----------
+    mod : tvm.IRModule
+        A Relax IRModule, typically post-LegalizeOps + AnnotateTIROpPattern so
+        that call_tir bindings carry an op_pattern attribute.
+
+    Returns
+    -------
+    rows : list of dict
+        One dict per binding, with keys::
+
+            name          str   — binding-var name_hint
+            callee        str   — call_tir GlobalVar name or relax Op name
+            op_pattern    int   — OpPatternKind (0..8)
+            mapping_type  int   — MappingType  (0..5)
+            mapping_name  str   — MappingType label, see DNNFUSION_MAPPING_TYPES
+            irs_bytes     int   — output tensor bytes, INT64_MAX if dynamic
+            is_seed_cand  bool  — True iff mapping_type == OtO and IRS is static
+    """
+    raw = _ffi_api.AnalyzeDnnFusionMappingTypes(mod)  # type: ignore
+    out: List[Dict[str, object]] = []
+    for row in raw:
+        out.append({k: row[k] for k in row})
+    return out
+
+
 def FuseTIR() -> tvm.ir.transform.Pass:
     """Fuse primitive relax function into a larger TIR function if possible
 
