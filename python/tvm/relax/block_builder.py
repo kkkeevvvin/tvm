@@ -150,6 +150,10 @@ class BlockBuilder(Object):
         mod = bb.get()
     """
 
+    # exp2 patch: tvm_ffi 0.1.10 enforces empty __slots__ by default; this
+    # class needs instance attrs (_func_stack etc.). Opt back into __dict__.
+    __slots__ = ("__dict__",)
+
     _stack = []
 
     @staticmethod

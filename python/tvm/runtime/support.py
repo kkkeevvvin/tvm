@@ -151,6 +151,13 @@ def derived_object(cls: type[T]) -> type[T]:
     class TVMDerivedObject(metadata["cls"]):  # type: ignore
         """The derived object to avoid cyclic dependency."""
 
+        # exp2 patch: tvm_ffi 0.1.10 enforces empty __slots__ on Object
+        # subclasses; this class needs to set _inst/key/handle plus
+        # arbitrary forwarded names (see __setattr__ below) and is also
+        # the target of a weakref (line ~176). Opt back into __dict__ +
+        # __weakref__.
+        __slots__ = ("__dict__", "__weakref__")
+
         _cls = cls
         _type = "TVMDerivedObject"
 
