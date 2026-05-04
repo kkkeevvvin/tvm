@@ -225,6 +225,8 @@ def _wrap_class_module_pass(pass_cls, pass_info):
     class PyModulePass(ModulePass):
         """Internal wrapper class to create a class instance."""
 
+        __slots__ = ("_inst",)
+
         def __init__(self, *args, **kwargs):
             inst = pass_cls(*args, **kwargs)
 

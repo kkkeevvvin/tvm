@@ -101,7 +101,7 @@ def split_host_device_mods(mod: IRModule) -> Tuple[IRModule, Dict[Target, IRModu
 
     def is_host_func(f):
         target = f.attrs.get("target", tvm.target.Target("llvm"))
-        return str(target.kind) in ["llvm", "c"]
+        return target.kind.name in ["llvm", "c"]
 
     host_mod = tvm.tir.transform.Filter(is_host_func)(mod)
     device_mod = tvm.tir.transform.Filter(lambda f: not is_host_func(f))(mod)
