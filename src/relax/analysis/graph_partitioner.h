@@ -28,6 +28,7 @@
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/type.h>
 
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -164,11 +165,12 @@ class DominatorTree {
 class GraphPartitioner {
  public:
   explicit GraphPartitioner(support::Arena* arena, int opt_level, size_t max_fuse_depth,
-                            size_t max_function_args)
+                            size_t max_function_args, std::string fusion_policy = "tvm")
       : arena_(arena),
         opt_level_(opt_level),
         max_fuse_depth_(max_fuse_depth),
-        max_function_args_(max_function_args) {}
+        max_function_args_(max_function_args),
+        fusion_policy_(std::move(fusion_policy)) {}
   /*!
    * \brief Group as a union find data structure.
    */
@@ -216,6 +218,8 @@ class GraphPartitioner {
   size_t max_fuse_depth_;
   /*! \brief The maximum number of arguments in one fused function */
   size_t max_function_args_;
+  /*! \brief Fusion predicate policy. "tvm" preserves upstream behavior. */
+  std::string fusion_policy_;
   /*! \brief The internal groups. */
   std::vector<Group*> groups_;
   /*! \brief internal field used for deduplication */
@@ -292,6 +296,11 @@ class GraphPartitioner {
   // number of the child's output node argument. It helps to stop fusing before the node when the
   // limit will be exceeded.
   size_t CountFusedArgs(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* child);
+
+  bool IsDnnfusionPolicyEnabled() const;
+  bool CheckDnnfFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
+  bool CheckDnnfFuse_(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
+  bool CommitFuseIfAllowed(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
 
   // Initialize the groups.
   void InitGroups(const IndexedForwardGraph& graph);

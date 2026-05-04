@@ -19,6 +19,8 @@
 
 #include "./graph_partitioner.h"
 
+#include "./dnnfusion_fusibility.h"
+
 #include <vector>
 
 namespace tvm {
@@ -204,6 +206,40 @@ void GraphPartitioner::CommitFuse(IndexedForwardGraph::Node* src, IndexedForward
   CommitFuse_(src, sink, target);
 }
 
+bool GraphPartitioner::IsDnnfusionPolicyEnabled() const { return fusion_policy_ == "dnnfusion"; }
+
+bool GraphPartitioner::CheckDnnfFuse_(IndexedForwardGraph::Node* src,
+                                      IndexedForwardGraph::Node* sink) {
+  if (visited_.count(src)) return true;
+  visited_.insert(src);
+  Group* src_group = groups_[src->index]->FindRoot();
+  Group* sink_group = groups_[sink->index]->FindRoot();
+  DnnfClassification src_cls = ClassifyDnnfOp(src, src_group->pattern);
+  DnnfClassification sink_cls = ClassifyDnnfOp(sink, sink_group->pattern);
+  DnnfFuseDecision decision = CanFuseDnnf(src_cls, sink_cls);
+  if (!decision.allow) return false;
+  if (src == sink) return true;
+  for (auto link = src->outputs.head; link != nullptr; link = link->next) {
+    if (!CheckDnnfFuse_(link->value.node, sink)) return false;
+  }
+  return true;
+}
+
+bool GraphPartitioner::CheckDnnfFuse(IndexedForwardGraph::Node* src,
+                                     IndexedForwardGraph::Node* sink) {
+  if (!IsDnnfusionPolicyEnabled()) return true;
+  visited_.clear();
+  ICHECK(src != sink);
+  return CheckDnnfFuse_(src, sink);
+}
+
+bool GraphPartitioner::CommitFuseIfAllowed(IndexedForwardGraph::Node* src,
+                                           IndexedForwardGraph::Node* sink) {
+  if (!CheckDnnfFuse(src, sink)) return false;
+  CommitFuse(src, sink);
+  return true;
+}
+
 size_t GraphPartitioner::CountNodesUptoSink_(IndexedForwardGraph::Node* src,
                                              IndexedForwardGraph::Node* sink) {
   if (src == sink || visited_.count(src)) return 0;
@@ -340,7 +376,7 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
           auto* src = it->second;
           auto* snode = post_dom_tree.nodes[src->index]->parent->gnode;
           if (groups_[snode->index]->anchor_ref != nullptr) continue;
-          CommitFuse(src, snode);
+          CommitFuseIfAllowed(src, snode);
         }
       }
       postponed_fusing_map_.erase(graph_node);
@@ -378,7 +414,7 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
         // dom_root_group can also be tuple, as in inception layers
         // CheckPath is needed to avoid fusing two intermediate tuples
         if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-          CommitFuse(graph_node, dom_node->parent->gnode);
+          CommitFuseIfAllowed(graph_node, dom_node->parent->gnode);
         }
       }
       continue;
@@ -401,7 +437,7 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
         // The fuse can be executed if all the intermediate ops are still broadcast.
         auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; };
         if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-          CommitFuse(graph_node, dom_node->parent->gnode);
+          CommitFuseIfAllowed(graph_node, dom_node->parent->gnode);
         }
       }
     } else if (group_node->pattern <= kBroadcast) {
@@ -421,7 +457,7 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
           }
         };
         if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-          CommitFuse(graph_node, dom_node->parent->gnode);
+          CommitFuseIfAllowed(graph_node, dom_node->parent->gnode);
         }
       }
     } else if (group_node->pattern == kInjective || group_node->pattern == kTuple) {
@@ -431,7 +467,7 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
       // Check if all path are injective.
       auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
       if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-        CommitFuse(graph_node, dom_node->parent->gnode);
+        CommitFuseIfAllowed(graph_node, dom_node->parent->gnode);
       }
     } else {
       // do nothing.

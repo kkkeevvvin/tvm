@@ -39,6 +39,7 @@
 #include <tvm/tir/function.h>
 
 #include <optional>
+#include <string>
 
 #include "../../support/arena.h"
 #include "../analysis/graph_partitioner.h"
@@ -98,6 +99,7 @@ using support::LinkNode;
 constexpr uint32_t kMaxFusedOps = 256;
 
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.max_depth", Integer);
+TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.fusion_policy", ffi::String);
 
 class GraphCreator : public ExprVisitor {
  public:
@@ -1038,7 +1040,8 @@ class OperatorFusor : public ExprMutator {
   bool lift_constants_{true};
 };
 
-IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth) {
+IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth,
+                 std::string fusion_policy = "tvm") {
   support::Arena arena;
 
   // Step 1. Create the indexed-forward graph according to the input IRModule.
@@ -1046,7 +1049,8 @@ IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth) {
 
   // Step 2. Partition the graph by applying the fusion algorithm.
   std::vector<GraphPartitioner::Group*> groups =
-      GraphPartitioner(&arena, opt_level, max_fuse_depth, /*max_function_args=*/0).Partition(graph);
+      GraphPartitioner(&arena, opt_level, max_fuse_depth, /*max_function_args=*/0, fusion_policy)
+          .Partition(graph);
 
   // Step 3. Transform the IRModule by fusing the operators in accordance with the graph partition
   // results.
@@ -1439,7 +1443,9 @@ Pass FuseOps(int fuse_opt_level) {
       [=](IRModule m, PassContext pc) {
         int opt_level = fuse_opt_level == -1 ? pc->opt_level : fuse_opt_level;
         auto max_fuse_depth = pc->GetConfig("relax.FuseOps.max_depth", Integer(kMaxFusedOps));
-        return relax::FuseOps(m, opt_level, max_fuse_depth.value().IntValue());
+        auto fusion_policy = pc->GetConfig("relax.FuseOps.fusion_policy", ffi::String("tvm"));
+        return relax::FuseOps(m, opt_level, max_fuse_depth.value().IntValue(),
+                              fusion_policy.value());
       };
   return CreateModulePass(/*pass_function=*/pass_func,  //
                           /*opt_level=*/0,              //
