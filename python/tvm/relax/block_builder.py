@@ -150,6 +150,10 @@ class BlockBuilder(Object):
         mod = bb.get()
     """
 
+    # Slot must be declared before @register_object sets __slots__ = () on the class,
+    # otherwise the decorator prevents instance attribute assignment.
+    __slots__ = ("_func_stack",)
+
     _stack = []
 
     @staticmethod
@@ -161,9 +165,9 @@ class BlockBuilder(Object):
             return None
 
     def __init__(self, mod: IRModule = None):
-        # Which functions are currently being defined
-        self._func_stack: List[FunctionScope] = []
         self.__init_handle_by_constructor__(_ffi_api.BlockBuilderCreate, mod)  # type: ignore
+        # _func_stack initialized after handle so the slot is ready for use.
+        self._func_stack: List[FunctionScope] = []
 
     def _begin_dataflow_block(self) -> None:
         _ffi_api.BlockBuilderBeginDataflowBlock(self)  # type: ignore
