@@ -41,6 +41,7 @@
 #include <optional>
 
 #include "../../support/arena.h"
+#include "../analysis/dnnfusion_planner.h"
 #include "../analysis/graph_partitioner.h"
 #include "tvm/relax/expr.h"
 #include "utils.h"
@@ -98,6 +99,16 @@ using support::LinkNode;
 constexpr uint32_t kMaxFusedOps = 256;
 
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.max_depth", Integer);
+// DNNFusion (Niu et al., PLDI '21) port — see
+// src/relax/analysis/dnnfusion_{mapping,planner}.{h,cc}.  The default
+// "tvm" leaves v0.23.0 behaviour entirely unchanged; "dnnfusion" routes
+// the partitioner through Listing 1.
+TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.algorithm", ffi::String);
+// Yellow (legal-but-needs-profile) cells in DNNFusion Table 3.  Only
+// consulted when algorithm == "dnnfusion".  "conservative" treats Yellow
+// as Red (do not fuse without profile data); "aggressive" treats Yellow
+// as Green (fuse when legal, accept the latency risk).
+TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.dnnfusion.yellow_policy", ffi::String);
 
 class GraphCreator : public ExprVisitor {
  public:
@@ -1038,15 +1049,25 @@ class OperatorFusor : public ExprMutator {
   bool lift_constants_{true};
 };
 
-IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth) {
+IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth, ffi::String algorithm,
+                 ffi::String yellow_policy) {
   support::Arena arena;
 
   // Step 1. Create the indexed-forward graph according to the input IRModule.
   IndexedForwardGraph graph = GraphCreator::Create(mod, &arena);
 
   // Step 2. Partition the graph by applying the fusion algorithm.
-  std::vector<GraphPartitioner::Group*> groups =
-      GraphPartitioner(&arena, opt_level, max_fuse_depth, /*max_function_args=*/0).Partition(graph);
+  GraphPartitioner partitioner(&arena, opt_level, max_fuse_depth, /*max_function_args=*/0);
+  if (algorithm == "dnnfusion") {
+    dnnfusion::PlannerOptions options;
+    options.aggressive_yellow = (yellow_policy == "aggressive");
+    partitioner.EnableDnnfusion(options, dnnfusion::CollectVarToOpName(mod));
+  } else {
+    ICHECK(algorithm.empty() || algorithm == "tvm")
+        << "relax.FuseOps.algorithm must be one of \"tvm\" / \"dnnfusion\", got \"" << algorithm
+        << "\"";
+  }
+  std::vector<GraphPartitioner::Group*> groups = partitioner.Partition(graph);
 
   // Step 3. Transform the IRModule by fusing the operators in accordance with the graph partition
   // results.
@@ -1439,7 +1460,13 @@ Pass FuseOps(int fuse_opt_level) {
       [=](IRModule m, PassContext pc) {
         int opt_level = fuse_opt_level == -1 ? pc->opt_level : fuse_opt_level;
         auto max_fuse_depth = pc->GetConfig("relax.FuseOps.max_depth", Integer(kMaxFusedOps));
-        return relax::FuseOps(m, opt_level, max_fuse_depth.value().IntValue());
+        auto algorithm =
+            pc->GetConfig("relax.FuseOps.algorithm", ffi::String("tvm")).value();
+        auto yellow_policy =
+            pc->GetConfig("relax.FuseOps.dnnfusion.yellow_policy", ffi::String("conservative"))
+                .value();
+        return relax::FuseOps(m, opt_level, max_fuse_depth.value().IntValue(), algorithm,
+                              yellow_policy);
       };
   return CreateModulePass(/*pass_function=*/pass_func,  //
                           /*opt_level=*/0,              //

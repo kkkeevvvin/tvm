@@ -19,6 +19,9 @@
 
 #include "./graph_partitioner.h"
 
+#include <functional>
+#include <limits>
+#include <unordered_set>
 #include <vector>
 
 namespace tvm {
@@ -102,6 +105,16 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
     const IndexedForwardGraph& graph) {
   this->InitGroups(graph);
   if (opt_level_ == 0) return std::move(groups_);
+
+  if (algorithm_ == Algorithm::kDnnfusion) {
+    // DNNFusion §4.3 Listing 1: a single seed-driven plan generator pass,
+    // not staged by phase.  The classifier + Table 3 inside RunFuseDnnfusion
+    // already handles the mapping-type cascade that TVM's 3-phase loop
+    // expresses through its OpPatternKind hierarchy.
+    this->RunFuseDnnfusion(graph);
+    return std::move(groups_);
+  }
+
   // get post dominator tree
   auto post_dom_tree = DominatorTree::PostDom(arena_, graph);
   // run fusion algorithm.
@@ -437,6 +450,187 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
       // do nothing.
       ICHECK(group_node->pattern == kCommReduce);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DNNFusion §4.3 Listing 1 fusion plan generator.
+//
+// Layout:
+//   - ComputeMappingTypes / ComputeIrsBytes prepass produces per-node
+//     side data; cached so the recursion below is O(1) per query.
+//   - PickSeed selects the smallest-IRS OtO node still unmerged.
+//   - TryFuseSucc / TryFusePred walk forward / backward edges,
+//     consulting Table 3 (FuseMappingCheck) and the conservative
+//     yellow-policy fallback.  Each successful candidate is merged into
+//     the seed's union-find group via the existing MergeFromTo helper.
+// ---------------------------------------------------------------------------
+void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
+  using dnnfusion::FuseColor;
+  using dnnfusion::FuseDecision;
+  using dnnfusion::FuseMappingCheck;
+  using dnnfusion::MappingType;
+  const size_t n = graph.post_dfs_order.size();
+  if (n == 0) return;
+
+  // Clear anchor_refs set during initialisation: those guard TVM's original
+  // kOutEWiseFusable (MtM) merging logic, but DNNFusion governs MtM fusions
+  // via Table 3 instead.  Without this, MergeFromTo's ICHECK fires whenever
+  // two kOutEWiseFusable groups are merged.
+  for (size_t i = 0; i < n; ++i) {
+    groups_[i]->anchor_ref = nullptr;
+  }
+
+  // --- Prepass: classify every node + compute IRS bytes.
+  std::vector<MappingType> mapping_type(n, MappingType::kUnknown);
+  std::vector<int64_t> irs_bytes(n, -1);
+  for (size_t i = 0; i < n; ++i) {
+    auto* node = graph.post_dfs_order[i];
+    mapping_type[i] = dnnfusion::DeriveNodeMappingType(node->ref, node->pattern, var_to_op_name_);
+    irs_bytes[i] = dnnfusion::ComputeIrsBytes(node->ref);
+  }
+
+  // --- Build immediate-predecessor lists (graph stores forward edges only).
+  std::vector<std::vector<size_t>> preds(n);
+  for (size_t i = 0; i < n; ++i) {
+    auto* node = graph.post_dfs_order[i];
+    for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
+      preds[link->value.node->index].push_back(i);
+    }
+  }
+
+  // Returns true if the candidate node is eligible to be touched at all
+  // (skip params, constants, externs, opaque pattern).
+  auto eligible = [&](size_t idx) -> bool {
+    auto* node = graph.post_dfs_order[idx];
+    if (node->extern_ref) return false;
+    if (node->pattern == kOpaque) return false;
+    if (mapping_type[idx] == MappingType::kUnknown) return false;
+    return true;
+  };
+
+  // --- Constraint: would merging child into parent's group blow past the
+  // configured max_fuse_depth_ on number of fused nodes?  Args limit is
+  // intentionally not enforced here; max_function_args_ is set to 0 by
+  // the default fuse_ops.cc invocation, and the DNNFusion-specific cost
+  // model is left to a follow-up M3.
+  auto exceeds_depth = [&](size_t parent_idx, size_t child_idx) -> bool {
+    if (max_fuse_depth_ == 0) return false;
+    Group* p = groups_[parent_idx]->FindRoot();
+    Group* c = groups_[child_idx]->FindRoot();
+    if (p == c) return false;
+    return (p->num_nodes + c->num_nodes) > max_fuse_depth_;
+  };
+
+  // --- Edge-level fusion test, returns true on commit.  Implements
+  // Listing 1 lines 9-21 (mapping type analysis -> constraint check ->
+  // commit) with the §4.3.2 profile-based oracle replaced by the
+  // conservative / aggressive yellow-policy switch.
+  //
+  // `forward` controls argument order for FuseMappingCheck:
+  //   forward=true  → op_idx produces output consumed by cand_idx
+  //                   (Listing 1 Step II: FusionDecision(cur, succ))
+  //   forward=false → cand_idx produces output consumed by op_idx
+  //                   (Listing 1 Step III: FusionDecision(pred, cur))
+  auto try_fuse_edge = [&](size_t op_idx, size_t cand_idx, bool forward) -> bool {
+    if (cand_idx == op_idx) return false;
+    if (!eligible(cand_idx)) return false;
+    if (groups_[cand_idx]->FindRoot() != groups_[cand_idx]) return false;
+    size_t first = forward ? op_idx : cand_idx;
+    size_t second = forward ? cand_idx : op_idx;
+    FuseDecision d = FuseMappingCheck(mapping_type[first], mapping_type[second]);
+    if (d.color == FuseColor::kRed) return false;
+    if (d.color == FuseColor::kYellow && !dnnfusion_options_.aggressive_yellow) return false;
+    if (exceeds_depth(op_idx, cand_idx)) return false;
+    Group* parent_root = groups_[op_idx]->FindRoot();
+    MergeFromTo(groups_[cand_idx], parent_root);
+    return true;
+  };
+
+  // --- Cycle guard for walk_succ: returns false if absorbing succ_idx into
+  // G = groups_[cur_idx]->FindRoot() would create a group-level cycle.
+  //
+  // A cycle arises when succ_idx has a predecessor P outside G and some
+  // ancestor of P (following pred links backward) already belongs to G.
+  // That means G's output transitively feeds P, so after the merge:
+  //   G depends on Group(P)  (via succ←P)
+  //   Group(P) depends on G  (via P's ancestor in G)
+  // — a bidirectional dependency that OperatorFusor rejects.
+  auto safe_to_merge_succ = [&](size_t cur_idx, size_t succ_idx) -> bool {
+    Group* G = groups_[cur_idx]->FindRoot();
+    for (size_t p : preds[succ_idx]) {
+      if (groups_[p]->FindRoot() == G) continue;  // already inside G
+      if (graph.post_dfs_order[p]->extern_ref) continue;
+      // Backward BFS from p: if we reach any node whose group root is G,
+      // the merge would be cyclic.
+      std::unordered_set<size_t> visited;
+      std::vector<size_t> queue;
+      queue.push_back(p);
+      visited.insert(p);
+      while (!queue.empty()) {
+        size_t cur = queue.back();
+        queue.pop_back();
+        if (groups_[cur]->FindRoot() == G) return false;
+        for (size_t pp : preds[cur]) {
+          if (visited.insert(pp).second) {
+            queue.push_back(pp);
+          }
+        }
+      }
+    }
+    return true;
+  };
+
+  // --- Step II / III: forward and backward propagation from a freshly
+  // merged node.  Recursion mirrors Listing 1 Lines 22-24 / 26-28; the
+  // "current op" we hand to the next-level mapping check is the most
+  // recent addition, not the seed, matching the paper's per-edge
+  // pairwise check.
+  std::function<void(size_t)> walk_succ = [&](size_t op_idx) {
+    auto* node = graph.post_dfs_order[op_idx];
+    for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
+      size_t s = link->value.node->index;
+      if (safe_to_merge_succ(op_idx, s) && try_fuse_edge(op_idx, s, /*forward=*/true)) {
+        walk_succ(s);
+      }
+    }
+  };
+  std::function<void(size_t)> walk_pred = [&](size_t op_idx) {
+    for (size_t p : preds[op_idx]) {
+      if (try_fuse_edge(op_idx, p, /*forward=*/false)) {
+        walk_pred(p);
+      }
+    }
+  };
+
+  // --- Main outer loop (Listing 1 Lines 30-41).
+  // seed_done marks OtO nodes already used as seeds so pick_seed() doesn't
+  // return them again (the seed stays its own group root, so the group-root
+  // check alone is not sufficient to prevent re-selection).
+  std::vector<bool> seed_done(n, false);
+  auto pick_seed_once = [&]() -> size_t {
+    size_t best = std::numeric_limits<size_t>::max();
+    int64_t best_bytes = std::numeric_limits<int64_t>::max();
+    for (size_t i = 0; i < n; ++i) {
+      if (seed_done[i]) continue;
+      if (!eligible(i)) continue;
+      if (mapping_type[i] != MappingType::kOneToOne) continue;
+      if (groups_[i]->FindRoot() != groups_[i]) continue;
+      int64_t b = irs_bytes[i];
+      int64_t key = (b < 0) ? std::numeric_limits<int64_t>::max() : b;
+      if (key < best_bytes || (key == best_bytes && i < best)) {
+        best_bytes = key;
+        best = i;
+      }
+    }
+    return best;
+  };
+  while (true) {
+    size_t seed = pick_seed_once();
+    if (seed == std::numeric_limits<size_t>::max()) break;
+    seed_done[seed] = true;
+    walk_succ(seed);
+    walk_pred(seed);
   }
 }
 
