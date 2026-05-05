@@ -1,0 +1,102 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+/*!
+ * \file src/relax/analysis/dnnfusion_planner.h
+ * \brief Helpers for the DNNFusion (Niu et al., PLDI '21) §4.3 fusion plan
+ *        generator.  The Listing 1 traversal itself lives inside
+ *        GraphPartitioner::RunFuseDnnfusion to keep union-find access
+ *        local; this header only exposes the side-utilities that don't
+ *        need to touch private partitioner state.
+ */
+
+#ifndef TVM_RELAX_ANALYSIS_DNNFUSION_PLANNER_H_
+#define TVM_RELAX_ANALYSIS_DNNFUSION_PLANNER_H_
+
+#include <tvm/ir/module.h>
+#include <tvm/relax/expr.h>
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+
+#include "dnnfusion_mapping.h"
+
+namespace tvm {
+namespace relax {
+namespace dnnfusion {
+
+/*!
+ * \brief Compile-time options for the DNNFusion plan generator.
+ */
+struct PlannerOptions {
+  /*!
+   * \brief How to treat Yellow (legal-but-needs-profile) cells in Table 3
+   * when no profile database is available.
+   *   false (conservative) : treat Yellow as Red, never fuse.
+   *   true  (aggressive)   : treat Yellow as Green, always fuse if legal.
+   */
+  bool aggressive_yellow = false;
+};
+
+/*!
+ * \brief Walk an IRModule and collect a map from Var (binding lhs) to the
+ * op name of the bound CallNode, if any.  Used by the planner to look up
+ * MappingType via the explicit Table 2 op-name table.
+ *
+ * For non-CallNode bindings (TupleGetItem, Tuple, etc.) the map has no
+ * entry and the planner falls back to OpPatternKind-based classification.
+ *
+ * For relax.call_tir / relax.call_tir_inplace bindings, the immediate op
+ * is the call_tir wrapper; the wrapped PrimFunc's name is recorded under
+ * the "tir." prefix (e.g. "tir.add" for a legalized relax.add).  This
+ * gives the classifier a chance to recognize a legalized-but-still
+ * paper-classified op via a "tir."-prefixed alias added in the future.
+ */
+std::unordered_map<const Object*, std::string> CollectVarToOpName(const IRModule& mod);
+
+/*!
+ * \brief Compute the IRS (intermediate result set) size in bytes for a
+ * graph node, derived from the StructInfo of the bound Var or Constant.
+ *
+ * For tuple-typed values, the size is summed over all tensor fields.
+ * Returns -1 if the StructInfo is unset, dynamic-shaped, or a non-tensor
+ * type (Shape / Prim / Object) that has no meaningful byte count — the
+ * caller should treat -1 as "sort to back of seed candidates".
+ */
+int64_t ComputeIrsBytes(const Object* ref);
+
+/*!
+ * \brief Resolve a graph node to a MappingType using the same fallback
+ * chain as the standalone DeriveMappingType helper, but driven by the
+ * (optional) side-map from CollectVarToOpName.
+ *
+ * \param ref     The graph node's owning Object* (Var or Constant).
+ * \param pattern OpPatternKind from the partitioner's IndexedForwardGraph.
+ * \param var_to_op_name Output of CollectVarToOpName for this IRModule.
+ */
+MappingType DeriveNodeMappingType(
+    const Object* ref, OpPatternKind pattern,
+    const std::unordered_map<const Object*, std::string>& var_to_op_name);
+
+}  // namespace dnnfusion
+}  // namespace relax
+}  // namespace tvm
+
+#endif  // TVM_RELAX_ANALYSIS_DNNFUSION_PLANNER_H_
