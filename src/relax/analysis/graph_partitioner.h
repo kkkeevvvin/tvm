@@ -28,11 +28,14 @@
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/type.h>
 
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "../../support/arena.h"
+#include "dnnfusion_mapping.h"
+#include "dnnfusion_planner.h"
 
 namespace tvm {
 namespace relax {
@@ -163,12 +166,40 @@ class DominatorTree {
  */
 class GraphPartitioner {
  public:
+  /*!
+   * \brief Choice of fusion algorithm executed by Partition().
+   *   kTvm       : v0.23.0 default — 3-phase post-dominator + OpPatternKind
+   *                cascade (RunFuse).
+   *   kDnnfusion : DNNFusion (Niu et al., PLDI '21) §4.3 Listing 1
+   *                seed-driven plan generator over the §3 MappingType
+   *                classification + §3.2 Table 3 fusion legality matrix.
+   */
+  enum class Algorithm {
+    kTvm = 0,
+    kDnnfusion = 1,
+  };
+
   explicit GraphPartitioner(support::Arena* arena, int opt_level, size_t max_fuse_depth,
                             size_t max_function_args)
       : arena_(arena),
         opt_level_(opt_level),
         max_fuse_depth_(max_fuse_depth),
         max_function_args_(max_function_args) {}
+
+  /*!
+   * \brief Switch this partitioner to the DNNFusion algorithm.  Must be
+   * called before Partition().  The supplied side-map (Var/Constant ref
+   * to op name) is consulted by the §3 classifier; pass an empty map to
+   * fall back exclusively to OpPatternKind-based classification.
+   */
+  GraphPartitioner& EnableDnnfusion(
+      dnnfusion::PlannerOptions options,
+      std::unordered_map<const Object*, std::string> var_to_op_name) {
+    algorithm_ = Algorithm::kDnnfusion;
+    dnnfusion_options_ = options;
+    var_to_op_name_ = std::move(var_to_op_name);
+    return *this;
+  }
   /*!
    * \brief Group as a union find data structure.
    */
@@ -296,8 +327,18 @@ class GraphPartitioner {
   // Initialize the groups.
   void InitGroups(const IndexedForwardGraph& graph);
 
-  // execute the fusion algorithm.
+  // execute the TVM v0.23.0 fusion algorithm (3-phase post-dominator + cascade).
   void RunFuse(const IndexedForwardGraph& graph, const DominatorTree& post_dom_tree, int phase);
+
+  // execute the DNNFusion §4.3 Listing 1 fusion plan generator.
+  void RunFuseDnnfusion(const IndexedForwardGraph& graph);
+
+  /*! \brief Selected fusion algorithm; defaults to kTvm. */
+  Algorithm algorithm_{Algorithm::kTvm};
+  /*! \brief Options consulted only when algorithm_ == kDnnfusion. */
+  dnnfusion::PlannerOptions dnnfusion_options_{};
+  /*! \brief Var/Constant ref -> op name; only populated for DNNFusion mode. */
+  std::unordered_map<const Object*, std::string> var_to_op_name_;
 };
 
 }  // namespace relax
