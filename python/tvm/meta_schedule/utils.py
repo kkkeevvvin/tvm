@@ -108,6 +108,12 @@ def derived_object(cls: type) -> type:
     class TVMDerivedObject(metadata["cls"]):  # type: ignore
         """The derived object to avoid cyclic dependency."""
 
+        # Object/CObject ancestors declare __slots__ = (), so without an
+        # explicit __slots__ here TVMDerivedObject has no __dict__ and the
+        # whitelisted writes in __setattr__ raise AttributeError.  Triggered
+        # by TVM v0.23.0 + new tvm_ffi.
+        __slots__ = ("_inst", "key", "handle", "__weakref__")
+
         _cls = cls
         _type = "TVMDerivedObject"
 
