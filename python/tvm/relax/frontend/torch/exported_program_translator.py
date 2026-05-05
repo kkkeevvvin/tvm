@@ -1579,7 +1579,18 @@ class ExportedProgramImporter(BaseFXGraphImporter):
                 torch_shape = exported_program.tensor_constants[spec.target].shape
                 torch_dtype = exported_program.tensor_constants[spec.target].dtype
             elif spec.kind is torch.export.graph_signature.InputKind.USER_INPUT:
-                for node in exported_program.graph.find_nodes(op="placeholder", target=spec.target):
+                # find_nodes was added in torch 2.4; fall back to manual scan.
+                _find = getattr(exported_program.graph, "find_nodes", None)
+                _nodes = (
+                    _find(op="placeholder", target=spec.target)
+                    if _find is not None
+                    else (
+                        n
+                        for n in exported_program.graph.nodes
+                        if n.op == "placeholder" and n.target == spec.target
+                    )
+                )
+                for node in _nodes:
                     if node.name == name_hint and "tensor_meta" in node.meta:
                         torch_shape = node.meta["tensor_meta"].shape
                         torch_dtype = node.meta["tensor_meta"].dtype
