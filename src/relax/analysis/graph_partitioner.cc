@@ -581,6 +581,51 @@ void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
     return true;
   };
 
+  // --- Cycle guard for walk_pred (mirror of safe_to_merge_succ):
+  // returns false if absorbing pred_idx into G would create a group-level
+  // cycle through pred_idx's siblings outside G.
+  //
+  // Scenario: pred_idx feeds multiple consumers, only some of which are
+  // already in G.  After merging pred into G, G now produces an output
+  // that flows to a sibling S outside G; S's downstream may transitively
+  // feed back into G, forming the cycle:
+  //   G --(pred)--> S --(...)--> G_member_already_in_G
+  //
+  // Forward BFS from each sibling S of pred_idx that is NOT in G; cycle
+  // if any node reachable forward lands in G.
+  //
+  // Without this guard, dnnfusion-aggressive crashes on
+  // BERT-base/DistilBERT inside OperatorFusor::CollectFuncBoundary with
+  // "A cyclic dependency detected between the groups ...".
+  auto safe_to_merge_pred = [&](size_t cur_idx, size_t pred_idx) -> bool {
+    Group* G = groups_[cur_idx]->FindRoot();
+    auto* pred_node = graph.post_dfs_order[pred_idx];
+    for (auto* link = pred_node->outputs.head; link != nullptr; link = link->next) {
+      size_t s = link->value.node->index;
+      if (groups_[s]->FindRoot() == G) continue;  // sibling already inside G
+      if (graph.post_dfs_order[s]->extern_ref) continue;
+      // Forward BFS from s: if we reach any node whose group root is G,
+      // the merge would create a group-level cycle.
+      std::unordered_set<size_t> visited;
+      std::vector<size_t> queue;
+      queue.push_back(s);
+      visited.insert(s);
+      while (!queue.empty()) {
+        size_t cur = queue.back();
+        queue.pop_back();
+        if (groups_[cur]->FindRoot() == G) return false;
+        auto* cn = graph.post_dfs_order[cur];
+        for (auto* clink = cn->outputs.head; clink != nullptr; clink = clink->next) {
+          size_t ss = clink->value.node->index;
+          if (visited.insert(ss).second) {
+            queue.push_back(ss);
+          }
+        }
+      }
+    }
+    return true;
+  };
+
   // --- Step II / III: forward and backward propagation from a freshly
   // merged node.  Recursion mirrors Listing 1 Lines 22-24 / 26-28; the
   // "current op" we hand to the next-level mapping check is the most
@@ -597,7 +642,7 @@ void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
   };
   std::function<void(size_t)> walk_pred = [&](size_t op_idx) {
     for (size_t p : preds[op_idx]) {
-      if (try_fuse_edge(op_idx, p, /*forward=*/false)) {
+      if (safe_to_merge_pred(op_idx, p) && try_fuse_edge(op_idx, p, /*forward=*/false)) {
         walk_pred(p);
       }
     }
