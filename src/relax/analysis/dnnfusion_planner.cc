@@ -56,8 +56,12 @@ class OpNameCollector : public ExprVisitor {
     const std::string& outer_name = op->name;
     if ((outer_name == "relax.call_tir" || outer_name == "relax.call_tir_inplace") &&
         call->args.size() >= 1) {
-      // call_tir: surface the wrapped PrimFunc under the "tir." prefix so
-      // the classifier can future-proof a Table-2 alias for legalized ops.
+      // call_tir: surface the wrapped PrimFunc.  We try to reverse the
+      // suffix LegalizeOps adds for disambiguation (e.g. "add1", "add_2",
+      // "add_inplace") so the resulting name has a chance of matching a
+      // "relax.<base>" entry in Table 2.  We record BOTH names so the
+      // classifier can try the relax-prefixed form first and fall back to
+      // the verbatim "tir.<gv_name>".
       if (const auto* gv = call->args[0].as<GlobalVarNode>()) {
         result[var_ref] = std::string("tir.") + std::string(gv->name_hint);
         return;
@@ -66,6 +70,49 @@ class OpNameCollector : public ExprVisitor {
     result[var_ref] = outer_name;
   }
 };
+
+// Strip LegalizeOps disambiguation suffixes from a PrimFunc name and try
+// the corresponding relax.<base> entry in Table 2.  Returns the empty
+// string if no relax-prefixed alias is plausible.
+//
+// LegalizeOps generates PrimFunc names like:
+//   "add"            (single occurrence)
+//   "add1", "add2"   (multiple occurrences)
+//   "add_inplace"    (suffix from in-place ops)
+// Strip trailing digits and known suffixes, then prepend "relax.".
+std::string SanitizeTirName(const std::string& tir_with_prefix) {
+  static const std::string kPrefix = "tir.";
+  if (tir_with_prefix.size() <= kPrefix.size() ||
+      tir_with_prefix.compare(0, kPrefix.size(), kPrefix) != 0) {
+    return std::string();
+  }
+  std::string body = tir_with_prefix.substr(kPrefix.size());
+  // Strip known suffixes
+  static const std::vector<std::string> kSuffixes = {"_inplace", "_fwd"};
+  for (const std::string& suf : kSuffixes) {
+    if (body.size() > suf.size() &&
+        body.compare(body.size() - suf.size(), suf.size(), suf) == 0) {
+      body = body.substr(0, body.size() - suf.size());
+      break;
+    }
+  }
+  // Strip trailing digits (and the optional "_" that may precede them)
+  size_t end = body.size();
+  while (end > 0 && std::isdigit(static_cast<unsigned char>(body[end - 1]))) {
+    --end;
+  }
+  if (end > 0 && body[end - 1] == '_') --end;
+  if (end == 0) return std::string();  // entirely digits
+  body = body.substr(0, end);
+  // Some PrimFunc names already have submodule prefixes baked in (e.g.
+  // "nn_relu"); convert underscores in the prefix portion to dots.  We
+  // recognize the "nn_" prefix specifically since that's the most common
+  // legalize-out form for relax.nn.* ops.
+  if (body.compare(0, 3, "nn_") == 0) {
+    body = "nn." + body.substr(3);
+  }
+  return std::string("relax.") + body;
+}
 
 int64_t StructInfoBytes(const StructInfo& sinfo) {
   if (const auto* tsi = sinfo.as<TensorStructInfoNode>()) {
@@ -127,6 +174,23 @@ MappingType DeriveNodeMappingType(
   if (ref != nullptr) {
     auto it = var_to_op_name.find(ref);
     if (it != var_to_op_name.end()) op_name = it->second;
+  }
+  // If op_name starts with "tir." (i.e. came from a legalized call_tir),
+  // first try a sanitized "relax.<base>" lookup so Table 2 has a chance of
+  // hitting.  Falls back to OpPatternKind if the sanitized name isn't in
+  // Table 2 either.
+  if (!op_name.empty() && op_name.compare(0, 4, "tir.") == 0) {
+    std::string relax_alias = SanitizeTirName(op_name);
+    if (!relax_alias.empty()) {
+      MappingType from_alias = DeriveMappingType(relax_alias, pattern);
+      // DeriveMappingType returns the OpPatternKind fallback when the
+      // explicit lookup misses; we only prefer the alias result when it
+      // actually came from Table 2 (i.e. would differ from the verbatim
+      // tir.<name> lookup, which currently always misses Table 2).
+      if (from_alias != DeriveMappingType(std::string(), pattern)) {
+        return from_alias;
+      }
+    }
   }
   return DeriveMappingType(op_name, pattern);
 }
