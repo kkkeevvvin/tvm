@@ -285,14 +285,19 @@ ProfileLookupResult LookupProfile(
   return {false, false};
 }
 
-// FFI: small helper accessible from Python tests / drivers for IRS sanity
-// checks.  CollectVarToOpName / DeriveNodeMappingType have no Python use
-// case at present (consumed only by GraphPartitioner internally), so they
-// stay C++-only to keep the FFI surface small.
+// FFI: small helpers accessible from Python tests / drivers.
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("relax.analysis.DnnfusionComputeIrsBytes",
                         [](Var var) -> int64_t { return ComputeIrsBytes(var.get()); });
+  // SanitizeTirName so Python-side enumerate_yellow_edges (in
+  // experiments/dnnfusion_port/runtime_profile.py) classifies mapping types
+  // identically to the C++ partitioner.  Removes the previously duplicated
+  // sanitize logic that risked drifting between languages.
+  refl::GlobalDef().def("relax.analysis.DnnfusionSanitizeTirName",
+                        [](ffi::String tir_name) -> ffi::String {
+                          return SanitizeTirName(std::string(tir_name));
+                        });
 }
 
 }  // namespace dnnfusion
