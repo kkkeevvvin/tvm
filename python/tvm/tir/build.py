@@ -101,7 +101,13 @@ def split_host_device_mods(mod: IRModule) -> Tuple[IRModule, Dict[Target, IRModu
 
     def is_host_func(f):
         target = f.attrs.get("target", tvm.target.Target("llvm"))
-        return str(target.kind) in ["llvm", "c"]
+        # iter-16 backport: v0.23.0 originally used str(target.kind) which
+        # returns the full repr (e.g. 'target.TargetKind(name="llvm", ...)')
+        # — it never matches "llvm"/"c", so split_host_device_mods classifies
+        # everything as device, GPU build hits "unknown intrinsic
+        # tir.tvm_call_packed" at LLVM codegen.  v0.24+ (PR after #18199)
+        # uses target.kind.name; we backport that fix here.
+        return target.kind.name in ["llvm", "c"]
 
     host_mod = tvm.tir.transform.Filter(is_host_func)(mod)
     device_mod = tvm.tir.transform.Filter(lambda f: not is_host_func(f))(mod)
