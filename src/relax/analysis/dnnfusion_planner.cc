@@ -195,6 +195,16 @@ MappingType DeriveNodeMappingType(
   return DeriveMappingType(op_name, pattern);
 }
 
+bool TvmCompatAllowsYellow(MappingType producer, MappingType consumer) {
+  using MT = MappingType;
+  // Only the three cells where TVM's RunFuse already allows the corresponding
+  // OpPatternKind transition.
+  if (producer == MT::kOneToOne && consumer == MT::kManyToMany) return true;
+  if (producer == MT::kManyToMany && consumer == MT::kOneToMany) return true;
+  if (producer == MT::kOneToMany && consumer == MT::kReorganize) return true;
+  return false;
+}
+
 // FFI: small helper accessible from Python tests / drivers for IRS sanity
 // checks.  CollectVarToOpName / DeriveNodeMappingType have no Python use
 // case at present (consumed only by GraphPartitioner internally), so they

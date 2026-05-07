@@ -540,7 +540,14 @@ void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
     size_t second = forward ? cand_idx : op_idx;
     FuseDecision d = FuseMappingCheck(mapping_type[first], mapping_type[second]);
     if (d.color == FuseColor::kRed) return false;
-    if (d.color == FuseColor::kYellow && !dnnfusion_options_.aggressive_yellow) return false;
+    if (d.color == FuseColor::kYellow) {
+      if (dnnfusion_options_.is_conservative()) return false;
+      if (dnnfusion_options_.is_tvm_compat() &&
+          !dnnfusion::TvmCompatAllowsYellow(mapping_type[first], mapping_type[second])) {
+        return false;
+      }
+      // is_aggressive(): fall through, treat as green
+    }
     if (exceeds_depth(op_idx, cand_idx)) return false;
     Group* parent_root = groups_[op_idx]->FindRoot();
     MergeFromTo(groups_[cand_idx], parent_root);

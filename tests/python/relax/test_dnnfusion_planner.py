@@ -149,13 +149,24 @@ def test_diamond_dnnfusion():
 
 
 def test_two_matmuls_dnnfusion_red():
-    """MtM x MtM is Red in Table 3; the two matmuls must stay separated."""
+    """MtM x MtM is Red, but the two matmuls here are NOT directly connected
+    (separated by add).  Per paper §3.2 (OtO x MtM = Green in either order),
+    the seed-driven walk from the add seed bridges both matmuls into one
+    group via OtO->MtM forward + MtM->OtO backward.
+
+    Note: Earlier dnnf-branch implementation had OtO x MtM = Yellow (a bug
+    documented in findings_paper_consistency_check.md), under which this
+    test asserted >= 2 groups.  After the Table-3 fix to match paper, the
+    seed walk transitively co-groups both matmuls.  Paper Listing 1 has no
+    per-block "no two MtM" constraint beyond Table 3 pairwise lookup, so
+    this is the paper-correct outcome.
+    """
     mod = _build_two_matmuls()
     fused_dnnf = _annotate_and_fuse(mod, algorithm="dnnfusion")
     n = _count_fused_funcs(fused_dnnf)
-    assert n >= 2, (
-        f"DNNFusion fused {n} groups; expected >=2 because MtM x MtM is Red. "
-        f"Check that matmul / matmul-bias never collapse into a single group."
+    assert n == 1, (
+        f"DNNFusion fused {n} groups; expected 1 — the add seed bridges "
+        f"both matmuls via OtO x MtM = Green (paper §3.2)."
     )
 
 

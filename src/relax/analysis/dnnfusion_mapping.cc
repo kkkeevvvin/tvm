@@ -256,11 +256,17 @@ constexpr TableEntry kFuseTable[kNumMappingTypes][kNumMappingTypes] = {
         {FuseColor::kRed, MappingType::kUnknown},
     },
     // first = OneToOne
+    // Paper §3.2 "One-to-One with others ... so they are profitable" — entire
+    // row is Green per paper text and Table 3 figure (light cells).  The
+    // dnnf branch's original mapping had OtO x OtM and OtO x MtM as Yellow,
+    // contradicting the explicit "Add and GEMM in either order ... ensuring
+    // correct and profitable fusion" example for OtO x MtM.  See
+    // experiments/dnnfusion_port/findings_paper_consistency_check.md.
     {
         {FuseColor::kRed,    MappingType::kUnknown},
         {FuseColor::kGreen,  MappingType::kOneToOne},     // OtO x OtO  -> OtO  (G)
-        {FuseColor::kYellow, MappingType::kOneToMany},    // OtO x OtM  -> OtM  (Y)
-        {FuseColor::kYellow, MappingType::kManyToMany},   // OtO x MtM  -> MtM  (Y)
+        {FuseColor::kGreen,  MappingType::kOneToMany},    // OtO x OtM  -> OtM  (G, paper)
+        {FuseColor::kGreen,  MappingType::kManyToMany},   // OtO x MtM  -> MtM  (G, paper Add+GEMM example)
         {FuseColor::kGreen,  MappingType::kReorganize},   // OtO x Reorg -> Reorg (G)
         {FuseColor::kGreen,  MappingType::kShuffle},      // OtO x Shuf -> Shuf (G)
     },

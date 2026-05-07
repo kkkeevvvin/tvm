@@ -1060,7 +1060,17 @@ IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth, ffi::String
   GraphPartitioner partitioner(&arena, opt_level, max_fuse_depth, /*max_function_args=*/0);
   if (algorithm == "dnnfusion") {
     dnnfusion::PlannerOptions options;
-    options.aggressive_yellow = (yellow_policy == "aggressive");
+    if (yellow_policy == "aggressive") {
+      options.yellow_policy = dnnfusion::YellowPolicy::kAggressive;
+    } else if (yellow_policy == "tvm_compat") {
+      options.yellow_policy = dnnfusion::YellowPolicy::kTvmCompat;
+    } else {
+      ICHECK(yellow_policy.empty() || yellow_policy == "conservative")
+          << "relax.FuseOps.dnnfusion.yellow_policy must be one of "
+          << "\"conservative\" / \"aggressive\" / \"tvm_compat\", got \""
+          << yellow_policy << "\"";
+      options.yellow_policy = dnnfusion::YellowPolicy::kConservative;
+    }
     partitioner.EnableDnnfusion(options, dnnfusion::CollectVarToOpName(mod));
   } else {
     ICHECK(algorithm.empty() || algorithm == "tvm")

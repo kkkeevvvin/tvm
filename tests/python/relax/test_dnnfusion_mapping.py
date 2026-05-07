@@ -150,9 +150,11 @@ _ROWS = [_OTO, _OTM, _MTM, _REO, _SHF]
 # fmt: off
 _TABLE3 = {
     # first  second  -> (color, result)
+    # Paper §3.2 "OtO with others ... so they are profitable" + Add+GEMM
+    # "in either order ... profitable" -> entire OtO row is Green.
     (_OTO, _OTO):  (_G, _OTO),
-    (_OTO, _OTM):  (_Y, _OTM),
-    (_OTO, _MTM):  (_Y, _MTM),
+    (_OTO, _OTM):  (_G, _OTM),
+    (_OTO, _MTM):  (_G, _MTM),
     (_OTO, _REO):  (_G, _REO),
     (_OTO, _SHF):  (_G, _SHF),
 

@@ -43,17 +43,53 @@ namespace relax {
 namespace dnnfusion {
 
 /*!
+ * \brief Yellow-cell handling policy for Table 3 fuse_depend cases.
+ *
+ * The paper §4.3.2 Step 2.3 calls for a profile-based oracle to decide
+ * whether each yellow cell should fuse.  We don't have a profile DB on
+ * dev/claude, so this enum picks one of three offline approximations.
+ */
+enum class YellowPolicy : int {
+  // Treat all yellow cells as red (never fuse).  Safe; in practice gives
+  // less fusion than TVM's baseline FuseOps because TVM's RunFuse already
+  // accepts a few of these cells.
+  kConservative = 0,
+  // Treat all yellow cells as green (always fuse when legal).
+  // Documented to break in three independent ways across vision +
+  // transformer; useful only as stress test.
+  kAggressive = 1,
+  // Allow only the yellow cells that TVM's existing OpPatternKind cascade
+  // also accepts, i.e. the subset where DNNFusion adds nothing risky on
+  // top of the baseline:
+  //   OtO  x MtM  : kElemWise -> kCommReduce / kOutEWiseFusable (safe)
+  //   MtM  x OtO  is already Green in Table 3, no change
+  //   MtM  x OtM  : kOutEWiseFusable -> kBroadcast (TVM's conv epilogue)
+  //   OtM  x Reorg: kBroadcast -> kInjective (TVM allows broadcast into
+  //                 injective epilogue)
+  // All other yellow cells stay red.  Goal: reproduce TVM's fusion legality
+  // while keeping DNNFusion's IRS-min OtO seed selection.
+  kTvmCompat = 2,
+};
+
+/*!
  * \brief Compile-time options for the DNNFusion plan generator.
  */
 struct PlannerOptions {
-  /*!
-   * \brief How to treat Yellow (legal-but-needs-profile) cells in Table 3
-   * when no profile database is available.
-   *   false (conservative) : treat Yellow as Red, never fuse.
-   *   true  (aggressive)   : treat Yellow as Green, always fuse if legal.
-   */
-  bool aggressive_yellow = false;
+  YellowPolicy yellow_policy = YellowPolicy::kConservative;
+
+  // Convenience accessors that match the original boolean API.
+  bool is_aggressive() const { return yellow_policy == YellowPolicy::kAggressive; }
+  bool is_conservative() const { return yellow_policy == YellowPolicy::kConservative; }
+  bool is_tvm_compat() const { return yellow_policy == YellowPolicy::kTvmCompat; }
 };
+
+/*!
+ * \brief Decide whether a specific yellow (producer, consumer) pair is
+ * allowed under the kTvmCompat policy.  Returns true to allow (treat as
+ * green), false to deny (treat as red).  Unknown / non-yellow inputs:
+ * undefined behavior; only call after confirming the pair is yellow.
+ */
+bool TvmCompatAllowsYellow(MappingType producer, MappingType consumer);
 
 /*!
  * \brief Walk an IRModule and collect a map from Var (binding lhs) to the
