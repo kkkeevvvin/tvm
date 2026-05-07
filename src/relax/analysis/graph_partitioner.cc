@@ -583,13 +583,14 @@ void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
           if (irs_bytes[first] == irs_bytes[second] && irs_bytes[first] > 0) {
             allow = true;
           }
-        } else if (mapping_type[first] == MT::kManyToMany && mapping_type[second] == MT::kReorganize) {
-          // MtM x Reorg (e.g. matmul -> reshape): same view-only argument,
-          // applied on output side.  Allow when IRS sizes equal.
-          if (irs_bytes[first] == irs_bytes[second] && irs_bytes[first] > 0) {
-            allow = true;
-          }
         }
+        // Note: MtM x Reorg was previously allowed under IRS-equal heuristic,
+        // but profile_db microbenchmarks (profile_db.json + runtime_profile_*.json)
+        // show speedup ~0.99x for this cell — i.e. fusion has NO benefit on
+        // LLVM CPU.  Per the audit in findings_critical_paper_audit.md item 12,
+        // we removed it from the auto rules so heuristic stays aligned with
+        // measured profile.  Profile-driven decisions still allow per-edge
+        // exceptions via yellow_policy="profile_db".
         // All other yellow cells under "auto": deny (same as conservative).
         if (!allow) return false;
       }

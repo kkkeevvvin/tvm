@@ -80,6 +80,14 @@ class OpNameCollector : public ExprVisitor {
 //   "add1", "add2"   (multiple occurrences)
 //   "add_inplace"    (suffix from in-place ops)
 // Strip trailing digits and known suffixes, then prepend "relax.".
+//
+// Some TOPI op names differ from the relax op name they were legalized
+// from (e.g. relax.permute_dims uses topi.transpose internally).  We
+// keep an alias map so SanitizeTirName resolves "tir.transpose" to
+// "relax.permute_dims" — without it, transpose ops in legalized BERT/
+// DistilBERT IR fall through to the kInjective fallback and are
+// classified as Reorganize instead of Shuffle (paper Table 2).  See
+// findings_critical_paper_audit.md item 4.
 std::string SanitizeTirName(const std::string& tir_with_prefix) {
   static const std::string kPrefix = "tir.";
   if (tir_with_prefix.size() <= kPrefix.size() ||
@@ -111,6 +119,12 @@ std::string SanitizeTirName(const std::string& tir_with_prefix) {
   if (body.compare(0, 3, "nn_") == 0) {
     body = "nn." + body.substr(3);
   }
+  // TOPI-name → relax-op-name aliases (kept tiny — extend on demand).
+  static const std::unordered_map<std::string, std::string> kTopiAlias = {
+      {"transpose", "permute_dims"},  // TOPI uses transpose; relax registers permute_dims
+  };
+  auto it = kTopiAlias.find(body);
+  if (it != kTopiAlias.end()) body = it->second;
   return std::string("relax.") + body;
 }
 
