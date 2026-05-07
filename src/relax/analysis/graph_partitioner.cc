@@ -546,7 +546,19 @@ void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
           !dnnfusion::TvmCompatAllowsYellow(mapping_type[first], mapping_type[second])) {
         return false;
       }
-      if (dnnfusion_options_.is_auto()) {
+      if (dnnfusion_options_.is_profile_db()) {
+        // Profile-driven oracle: consult precomputed DB of fused-vs-unfused
+        // latency decisions.  See dnnfusion_planner.h kProfileDb docs.
+        auto* p_node = graph.post_dfs_order[first];
+        auto* c_node = graph.post_dfs_order[second];
+        std::string edge_sig = dnnfusion::MakeEdgeSignature(p_node->ref, c_node->ref, var_to_op_name_);
+        std::string cell_sig = dnnfusion::MakeCellSignature(mapping_type[first], mapping_type[second]);
+        dnnfusion::ProfileLookupResult result = dnnfusion::LookupProfile(
+            dnnfusion_options_.profile_decisions, edge_sig, cell_sig);
+        if (!result.found) return false;     // miss → conservative deny
+        if (!result.allow) return false;     // profile says don't fuse
+        // else: profile says fuse, fall through (treat as green)
+      } else if (dnnfusion_options_.is_auto()) {
         using MT = dnnfusion::MappingType;
         bool allow = false;
         // Cell-by-cell auto rules.  Each rule is a heuristic stand-in for

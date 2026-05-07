@@ -109,6 +109,14 @@ TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.algorithm", ffi::String);
 // as Red (do not fuse without profile data); "aggressive" treats Yellow
 // as Green (fuse when legal, accept the latency risk).
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.dnnfusion.yellow_policy", ffi::String);
+// Profile DB for yellow_policy = "profile_db".  Passed as a JSON string of
+// the form `{"signature": 0_or_1, ...}` (we parse with a lightweight
+// hand-rolled parser to avoid pulling in dmlc/json.h).
+//
+// Signature is either per-edge ("<p_callee>|<c_callee>|<p_shape>|<c_shape>")
+// or per-cell-type ("<p_mt_name>_x_<c_mt_name>", e.g. "ManyToMany_x_Reorganize").
+// Per-edge entries take precedence; misses fall through to conservative deny.
+TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.dnnfusion.profile_db_json", ffi::String);
 
 class GraphCreator : public ExprVisitor {
  public:
@@ -1049,8 +1057,52 @@ class OperatorFusor : public ExprMutator {
   bool lift_constants_{true};
 };
 
+// Lightweight JSON-object parser for the profile DB.  Expects the exact
+// shape `{"<sig1>": 0_or_1, "<sig2>": 0_or_1, ...}` (no whitespace
+// requirements; tolerates ASCII spaces, tabs, newlines).  Returns the
+// number of (key, value) pairs successfully parsed.
+size_t ParseProfileDbJson(const std::string& json, std::unordered_map<std::string, bool>* out) {
+  size_t i = 0, n = json.size(), parsed = 0;
+  auto skip_ws = [&]() {
+    while (i < n && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+  };
+  skip_ws();
+  if (i >= n || json[i] != '{') return 0;
+  ++i;
+  while (true) {
+    skip_ws();
+    if (i < n && json[i] == '}') { ++i; break; }
+    if (i >= n || json[i] != '"') break;
+    // Parse key (no escape sequence support — keys are signatures, no quotes inside)
+    ++i;
+    size_t key_start = i;
+    while (i < n && json[i] != '"') ++i;
+    if (i >= n) break;
+    std::string key = json.substr(key_start, i - key_start);
+    ++i;
+    skip_ws();
+    if (i >= n || json[i] != ':') break;
+    ++i;
+    skip_ws();
+    // Parse value: must be 0 or 1
+    if (i >= n) break;
+    bool v;
+    if (json[i] == '0') { v = false; ++i; }
+    else if (json[i] == '1') { v = true; ++i; }
+    else break;
+    (*out)[key] = v;
+    ++parsed;
+    skip_ws();
+    if (i < n && json[i] == ',') { ++i; continue; }
+    if (i < n && json[i] == '}') { ++i; break; }
+    break;
+  }
+  return parsed;
+}
+
 IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth, ffi::String algorithm,
-                 ffi::String yellow_policy) {
+                 ffi::String yellow_policy,
+                 ffi::String profile_db_json = ffi::String("")) {
   support::Arena arena;
 
   // Step 1. Create the indexed-forward graph according to the input IRModule.
@@ -1066,10 +1118,14 @@ IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth, ffi::String
       options.yellow_policy = dnnfusion::YellowPolicy::kTvmCompat;
     } else if (yellow_policy == "auto") {
       options.yellow_policy = dnnfusion::YellowPolicy::kAuto;
+    } else if (yellow_policy == "profile_db") {
+      options.yellow_policy = dnnfusion::YellowPolicy::kProfileDb;
+      // Parse JSON-encoded {sig: 0|1} into the C++ unordered_map.
+      ParseProfileDbJson(std::string(profile_db_json), &options.profile_decisions);
     } else {
       ICHECK(yellow_policy.empty() || yellow_policy == "conservative")
           << "relax.FuseOps.dnnfusion.yellow_policy must be one of "
-          << "\"conservative\" / \"aggressive\" / \"tvm_compat\" / \"auto\", got \""
+          << "\"conservative\" / \"aggressive\" / \"tvm_compat\" / \"auto\" / \"profile_db\", got \""
           << yellow_policy << "\"";
       options.yellow_policy = dnnfusion::YellowPolicy::kConservative;
     }
@@ -1477,8 +1533,12 @@ Pass FuseOps(int fuse_opt_level) {
         auto yellow_policy =
             pc->GetConfig("relax.FuseOps.dnnfusion.yellow_policy", ffi::String("conservative"))
                 .value();
+        auto profile_db_json_opt =
+            pc->GetConfig<ffi::String>("relax.FuseOps.dnnfusion.profile_db_json");
+        ffi::String profile_db_json =
+            profile_db_json_opt.has_value() ? profile_db_json_opt.value() : ffi::String("");
         return relax::FuseOps(m, opt_level, max_fuse_depth.value().IntValue(), algorithm,
-                              yellow_policy);
+                              yellow_policy, profile_db_json);
       };
   return CreateModulePass(/*pass_function=*/pass_func,  //
                           /*opt_level=*/0,              //

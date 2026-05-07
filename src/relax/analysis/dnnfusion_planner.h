@@ -79,6 +79,18 @@ enum class YellowPolicy : int {
   // selection that we can ship without runtime measurements.  See
   // experiments/dnnfusion_port/design_yellow_oracle.md for rationale.
   kAuto = 3,
+  // Real profile-driven oracle (paper §4.3.2 Step 2.3 spirit).  Yellow
+  // decisions come from runtime latency measurements supplied by the
+  // caller via PassContext config (a precomputed signature → bool dict).
+  // Lookup precedence:
+  //   1. Try per-edge signature: "<producer_callee>|<consumer_callee>|<p_shape>|<c_shape>"
+  //   2. Fall back to cell-type signature: "<producer_mt>_x_<consumer_mt>"
+  //      (e.g. "MtM_x_OtM")
+  //   3. Miss → deny (conservative).
+  // The per-edge signature lets a Python pre-pass build microbenchmarks
+  // for the actual shapes in the model; the cell-type fallback covers
+  // edges where no per-edge measurement was taken.
+  kProfileDb = 4,
 };
 
 /*!
@@ -94,11 +106,19 @@ struct PlannerOptions {
   // potential register pressure.
   double mtm_otm_max_broadcast_factor = 8.0;
 
+  // Used when yellow_policy == kProfileDb.  Mapping from signature →
+  // allow (true) / deny (false).  Lookups are tried in this order:
+  //   1. per-edge signature "<p_callee>|<c_callee>|<p_shape>|<c_shape>"
+  //   2. per-cell-type signature "<p_mt_name>_x_<c_mt_name>"
+  // Misses default to deny (conservative).
+  std::unordered_map<std::string, bool> profile_decisions;
+
   // Convenience accessors that match the original boolean API.
   bool is_aggressive() const { return yellow_policy == YellowPolicy::kAggressive; }
   bool is_conservative() const { return yellow_policy == YellowPolicy::kConservative; }
   bool is_tvm_compat() const { return yellow_policy == YellowPolicy::kTvmCompat; }
   bool is_auto() const { return yellow_policy == YellowPolicy::kAuto; }
+  bool is_profile_db() const { return yellow_policy == YellowPolicy::kProfileDb; }
 };
 
 /*!
@@ -108,6 +128,39 @@ struct PlannerOptions {
  * undefined behavior; only call after confirming the pair is yellow.
  */
 bool TvmCompatAllowsYellow(MappingType producer, MappingType consumer);
+
+/*!
+ * \brief Build the cell-type fallback signature for the profile DB.
+ * Returns strings like "MtM_x_OtM" / "Reorg_x_MtM".  Used when no
+ * per-edge entry exists in the DB.
+ */
+std::string MakeCellSignature(MappingType producer, MappingType consumer);
+
+/*!
+ * \brief Build a per-edge signature combining callee names + output shapes.
+ * Format: "<p_callee>|<c_callee>|<p_shape>|<c_shape>" with shapes encoded as
+ * "DxDxD" (or empty when struct_info is missing/dynamic).
+ *
+ * `p_ref` / `c_ref` are the IndexedForwardGraph::Node::ref pointers (Var or
+ * Constant).  `var_to_op_name` is the same map produced by
+ * CollectVarToOpName.
+ */
+std::string MakeEdgeSignature(
+    const Object* p_ref, const Object* c_ref,
+    const std::unordered_map<const Object*, std::string>& var_to_op_name);
+
+/*!
+ * \brief Look up a yellow edge in the profile DB, with per-edge signature
+ * preferred over cell-type fallback.  Returns:
+ *   {found=true,  allow=...} on hit
+ *   {found=false, allow=false} on miss (caller should deny under
+ *                               conservative-style fallback)
+ */
+struct ProfileLookupResult { bool found; bool allow; };
+ProfileLookupResult LookupProfile(
+    const std::unordered_map<std::string, bool>& db,
+    const std::string& edge_signature,
+    const std::string& cell_signature);
 
 /*!
  * \brief Walk an IRModule and collect a map from Var (binding lhs) to the

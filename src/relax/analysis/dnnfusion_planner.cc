@@ -205,6 +205,72 @@ bool TvmCompatAllowsYellow(MappingType producer, MappingType consumer) {
   return false;
 }
 
+std::string MakeCellSignature(MappingType producer, MappingType consumer) {
+  return std::string(MappingTypeName(producer)) + "_x_" + MappingTypeName(consumer);
+}
+
+namespace {
+
+std::string ShapeStringFromStructInfo(const StructInfo& sinfo) {
+  if (const auto* tsi = sinfo.as<TensorStructInfoNode>()) {
+    const auto* shape = tsi->shape.as<ShapeExprNode>();
+    if (shape == nullptr) return "";  // dynamic
+    std::string out;
+    for (const PrimExpr& v : shape->values) {
+      const auto* imm = v.as<IntImmNode>();
+      if (imm == nullptr) return "";  // dynamic
+      if (!out.empty()) out += "x";
+      out += std::to_string(imm->value);
+    }
+    return out;
+  }
+  return "";
+}
+
+}  // namespace
+
+std::string MakeEdgeSignature(
+    const Object* p_ref, const Object* c_ref,
+    const std::unordered_map<const Object*, std::string>& var_to_op_name) {
+  std::string p_callee, c_callee;
+  if (p_ref != nullptr) {
+    auto it = var_to_op_name.find(p_ref);
+    if (it != var_to_op_name.end()) p_callee = it->second;
+  }
+  if (c_ref != nullptr) {
+    auto it = var_to_op_name.find(c_ref);
+    if (it != var_to_op_name.end()) c_callee = it->second;
+  }
+  std::string p_shape, c_shape;
+  if (p_ref != nullptr && p_ref->IsInstance<VarNode>()) {
+    const auto* var = static_cast<const VarNode*>(p_ref);
+    if (auto* sinfo_node = var->struct_info_.as<StructInfoNode>()) {
+      p_shape = ShapeStringFromStructInfo(ffi::GetRef<StructInfo>(sinfo_node));
+    }
+  }
+  if (c_ref != nullptr && c_ref->IsInstance<VarNode>()) {
+    const auto* var = static_cast<const VarNode*>(c_ref);
+    if (auto* sinfo_node = var->struct_info_.as<StructInfoNode>()) {
+      c_shape = ShapeStringFromStructInfo(ffi::GetRef<StructInfo>(sinfo_node));
+    }
+  }
+  return p_callee + "|" + c_callee + "|" + p_shape + "|" + c_shape;
+}
+
+ProfileLookupResult LookupProfile(
+    const std::unordered_map<std::string, bool>& db,
+    const std::string& edge_signature,
+    const std::string& cell_signature) {
+  // 1. Try the per-edge signature first.
+  auto it = db.find(edge_signature);
+  if (it != db.end()) return {true, it->second};
+  // 2. Fall back to cell-type signature.
+  it = db.find(cell_signature);
+  if (it != db.end()) return {true, it->second};
+  // 3. Miss.
+  return {false, false};
+}
+
 // FFI: small helper accessible from Python tests / drivers for IRS sanity
 // checks.  CollectVarToOpName / DeriveNodeMappingType have no Python use
 // case at present (consumed only by GraphPartitioner internally), so they
