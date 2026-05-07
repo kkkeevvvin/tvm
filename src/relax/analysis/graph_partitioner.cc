@@ -546,6 +546,41 @@ void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
           !dnnfusion::TvmCompatAllowsYellow(mapping_type[first], mapping_type[second])) {
         return false;
       }
+      if (dnnfusion_options_.is_auto()) {
+        using MT = dnnfusion::MappingType;
+        bool allow = false;
+        // Cell-by-cell auto rules.  Each rule is a heuristic stand-in for
+        // paper §4.3.2 Step 2.3's profile-based oracle.
+        if (mapping_type[first] == MT::kManyToMany && mapping_type[second] == MT::kOneToMany) {
+          // MtM x OtM (e.g. conv -> broadcast): allow if broadcast factor
+          // IRS(consumer)/IRS(producer) is bounded.
+          int64_t producer_bytes = irs_bytes[first];
+          int64_t consumer_bytes = irs_bytes[second];
+          if (producer_bytes > 0 && consumer_bytes > 0) {
+            double factor = static_cast<double>(consumer_bytes) /
+                            static_cast<double>(producer_bytes);
+            if (factor <= dnnfusion_options_.mtm_otm_max_broadcast_factor) allow = true;
+          }
+        } else if (mapping_type[first] == MT::kReorganize && mapping_type[second] == MT::kManyToMany) {
+          // Reorg x MtM (e.g. reshape -> matmul):  TVM's existing path
+          // disallows this (kInjective -> kOutEWiseFusable), but in
+          // transformer attention the reshape is usually a pure layout view
+          // (no element movement), so the consumer matmul can fold the
+          // reshape into its index expression with no extra cost.  Allow
+          // when IRS sizes are equal (which implies pure view).
+          if (irs_bytes[first] == irs_bytes[second] && irs_bytes[first] > 0) {
+            allow = true;
+          }
+        } else if (mapping_type[first] == MT::kManyToMany && mapping_type[second] == MT::kReorganize) {
+          // MtM x Reorg (e.g. matmul -> reshape): same view-only argument,
+          // applied on output side.  Allow when IRS sizes equal.
+          if (irs_bytes[first] == irs_bytes[second] && irs_bytes[first] > 0) {
+            allow = true;
+          }
+        }
+        // All other yellow cells under "auto": deny (same as conservative).
+        if (!allow) return false;
+      }
       // is_aggressive(): fall through, treat as green
     }
     if (exceeds_depth(op_idx, cand_idx)) return false;

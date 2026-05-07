@@ -69,6 +69,16 @@ enum class YellowPolicy : int {
   // All other yellow cells stay red.  Goal: reproduce TVM's fusion legality
   // while keeping DNNFusion's IRS-min OtO seed selection.
   kTvmCompat = 2,
+  // Cost-proxy oracle approximating paper §4.3.2 Step 2.3 without a
+  // profile DB.  Per-cell heuristics:
+  //   MtM x OtM (conv -> broadcast):
+  //       allow if broadcast factor IRS(consumer)/IRS(producer) <= 8
+  //   All other yellow cells:
+  //       deny (same as conservative)
+  // This is meant to be the closest stand-in for the paper's profile-based
+  // selection that we can ship without runtime measurements.  See
+  // experiments/dnnfusion_port/design_yellow_oracle.md for rationale.
+  kAuto = 3,
 };
 
 /*!
@@ -77,10 +87,18 @@ enum class YellowPolicy : int {
 struct PlannerOptions {
   YellowPolicy yellow_policy = YellowPolicy::kConservative;
 
+  // Used when yellow_policy == kAuto.  Allow MtM x OtM merges only when
+  // the consumer's IRS / producer's IRS <= this factor.  Default 8 means
+  // "broadcast at most 8x per element"; higher values pull more
+  // broadcast-after-conv chains into the conv group at the cost of
+  // potential register pressure.
+  double mtm_otm_max_broadcast_factor = 8.0;
+
   // Convenience accessors that match the original boolean API.
   bool is_aggressive() const { return yellow_policy == YellowPolicy::kAggressive; }
   bool is_conservative() const { return yellow_policy == YellowPolicy::kConservative; }
   bool is_tvm_compat() const { return yellow_policy == YellowPolicy::kTvmCompat; }
+  bool is_auto() const { return yellow_policy == YellowPolicy::kAuto; }
 };
 
 /*!

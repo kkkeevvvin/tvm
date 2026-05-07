@@ -1064,10 +1064,12 @@ IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth, ffi::String
       options.yellow_policy = dnnfusion::YellowPolicy::kAggressive;
     } else if (yellow_policy == "tvm_compat") {
       options.yellow_policy = dnnfusion::YellowPolicy::kTvmCompat;
+    } else if (yellow_policy == "auto") {
+      options.yellow_policy = dnnfusion::YellowPolicy::kAuto;
     } else {
       ICHECK(yellow_policy.empty() || yellow_policy == "conservative")
           << "relax.FuseOps.dnnfusion.yellow_policy must be one of "
-          << "\"conservative\" / \"aggressive\" / \"tvm_compat\", got \""
+          << "\"conservative\" / \"aggressive\" / \"tvm_compat\" / \"auto\", got \""
           << yellow_policy << "\"";
       options.yellow_policy = dnnfusion::YellowPolicy::kConservative;
     }
