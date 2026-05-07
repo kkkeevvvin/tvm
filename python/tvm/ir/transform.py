@@ -225,6 +225,11 @@ def _wrap_class_module_pass(pass_cls, pass_info):
     class PyModulePass(ModulePass):
         """Internal wrapper class to create a class instance."""
 
+        # ModulePass parent class is annotated with @tvm_ffi.register_object
+        # which sets __slots__ = (); declare _inst here so the instance
+        # attribute assignment below succeeds.
+        __slots__ = ("_inst",)
+
         def __init__(self, *args, **kwargs):
             inst = pass_cls(*args, **kwargs)
 

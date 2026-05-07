@@ -151,6 +151,15 @@ def derived_object(cls: type[T]) -> type[T]:
     class TVMDerivedObject(metadata["cls"]):  # type: ignore
         """The derived object to avoid cyclic dependency."""
 
+        # Parent class is annotated with @register_object which sets
+        # __slots__ = (); declare _inst here so the assignment in __init__
+        # below succeeds.  Same root cause as the BlockBuilder _func_stack
+        # fix in commit f4f394416 and the PyModulePass _inst fix in
+        # ir/transform.py.
+        # __weakref__ is required because __init__ below stores a
+        # weakref.ref(self) on the inner instance.
+        __slots__ = ("_inst", "__weakref__")
+
         _cls = cls
         _type = "TVMDerivedObject"
 
