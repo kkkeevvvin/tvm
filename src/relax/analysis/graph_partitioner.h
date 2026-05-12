@@ -73,6 +73,11 @@ class IndexedForwardGraph {
     bool extern_ref{false};
     /*! \brief The general pattern in the node */
     OpPatternKind pattern{kOpaque};
+    /*! \brief Byte size of the produced tensor (sum for Tuple results).
+     *  -1 = unknown (non-tensor ref, dynamic dim, missing struct_info).
+     *  Populated at node creation from the ref's struct_info.
+     */
+    int64_t output_bytes{-1};
     /*! \brief The outputs of the node. */
     LinkedList<Edge> outputs;
   };

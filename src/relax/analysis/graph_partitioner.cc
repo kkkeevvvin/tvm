@@ -487,7 +487,7 @@ void GraphPartitioner::RunFuseDnnfusion(const IndexedForwardGraph& graph) {
   for (size_t i = 0; i < n; ++i) {
     auto* node = graph.post_dfs_order[i];
     mapping_type[i] = dnnfusion::DeriveNodeMappingType(node->ref, node->pattern, var_to_op_name_);
-    irs_bytes[i] = dnnfusion::ComputeIrsBytes(node->ref);
+    irs_bytes[i] = node->output_bytes;
   }
 
   // --- Build immediate-predecessor lists (graph stores forward edges only).

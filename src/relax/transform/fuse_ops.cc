@@ -342,6 +342,7 @@ class GraphCreator : public ExprVisitor {
 
     node->ref = key;
     node->index = graph_.post_dfs_order.size();
+    node->output_bytes = dnnfusion::ComputeIrsBytes(key);
     graph_.post_dfs_order.push_back(node);
   }
 
@@ -1517,7 +1518,9 @@ ffi::String DumpIndexedForwardGraph(IRModule mod) {
     }
     os << "node[" << i << "] pattern=" << pattern_name(node->pattern)
        << (node->extern_ref ? " extern_ref" : "")
-       << " outputs=[";
+       << " bytes=";
+    if (node->output_bytes < 0) os << "?"; else os << node->output_bytes;
+    os << " outputs=[";
     bool first = true;
     for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
       if (!first) os << ", ";
