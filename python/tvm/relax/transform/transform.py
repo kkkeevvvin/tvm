@@ -785,6 +785,25 @@ def AnnotateTIROpPattern() -> tvm.ir.transform.Pass:
     return _ffi_api.AnnotateTIROpPattern()  # type: ignore
 
 
+def AnnotateIRS() -> tvm.ir.transform.Pass:
+    """Annotate ``irs_output_bytes`` on each TIR PrimFunc.
+
+    The annotation is the byte size of the function's DPS-style output buffer
+    (the last param mapped through ``buffer_map``). A value of ``-1`` means the
+    output buffer was not in the expected position, the shape was symbolic, or
+    the dtype size was undefined.
+
+    Designed to run after ``LegalizeOps``. Downstream consumers (e.g. a
+    DNNFusion-style seed selector) read the attribute via
+    ``mod[gv].attrs["irs_output_bytes"]``.
+
+    Returns
+    -------
+    ret: tvm.ir.transform.Pass
+    """
+    return _ffi_api.AnnotateIRS()  # type: ignore
+
+
 def FuseOps(fuse_opt_level=-1) -> tvm.ir.transform.Pass:
     """This pass groups bindings in a dataflow block of Relax functions and generate a new grouped
     Relax function for each group, according to the fusion algorithm described in the pass
