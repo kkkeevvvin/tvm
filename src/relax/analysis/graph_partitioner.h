@@ -28,6 +28,7 @@
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/type.h>
 
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -72,6 +73,18 @@ class IndexedForwardGraph {
     OpPatternKind pattern{kOpaque};
     /*! \brief The outputs of the node. */
     LinkedList<Edge> outputs;
+    /*!
+     * \brief Bytes of this op's output tensor (intermediate result size).
+     * 0 means non-tensor output (e.g. shape value, opaque) or unfilled.
+     * Used by elmsd seed selection (DNNFusion §4.3.2 Step I).
+     */
+    int64_t output_size{0};
+    /*!
+     * \brief Bytes of this op's input tensors, in call-arg order.
+     * 0 entries correspond to non-tensor args (GlobalVar, ShapeExpr, etc.).
+     * Stored for completeness; not consumed by v1 partitioner.
+     */
+    std::vector<int64_t> input_sizes;
   };
   /*! \brief The node map that maps node to graph */
   std::unordered_map<const tvm::Object*, Node*> node_map;
@@ -298,6 +311,31 @@ class GraphPartitioner {
 
   // execute the fusion algorithm.
   void RunFuse(const IndexedForwardGraph& graph, const DominatorTree& post_dom_tree, int phase);
+
+  // ---------- elmsd v1: seed-driven fusion ----------
+  // See MLC-elmsd/log/20260507_elmsd_v1_design.md for the design.
+
+  // Pick the kElemWise op with the smallest output_size from `unfused`.
+  // Returns nullptr when no candidate seed remains.
+  IndexedForwardGraph::Node* ElmsdGenerateSeed(
+      const std::set<size_t>& unfused, const IndexedForwardGraph& graph);
+
+  // Recursively grow seed's group along outputs (forward=true) or inputs (forward=false).
+  // `current` is the most recently absorbed node; we expand from its neighbors.
+  void ElmsdFuseDirection(
+      IndexedForwardGraph::Node* seed, IndexedForwardGraph::Node* current,
+      const IndexedForwardGraph& graph, bool forward,
+      const std::vector<std::vector<IndexedForwardGraph::Node*>>& preds);
+
+  // Decide whether `nbr` may join seed's current group under elmsd v1's predicate.
+  bool ElmsdIsFusible(IndexedForwardGraph::Node* seed_node, IndexedForwardGraph::Node* nbr);
+
+  // Merge `nbr_group` into `seed_root` (union-find), combining num_nodes / args_num /
+  // anchor_ref / pattern. Like MergeFromTo, but pattern is updated unconditionally
+  // (max), bypassing CombinePattern's fatal-on-two-complex check (which is too strict
+  // for seed-driven block growth; ElmsdIsFusible already enforces the relevant
+  // invariants upstream).
+  void ElmsdMergeIntoSeedGroup(Group* nbr_group, Group* seed_root);
 };
 
 }  // namespace relax

@@ -99,6 +99,36 @@ constexpr uint32_t kMaxFusedOps = 256;
 
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.max_depth", Integer);
 
+// elmsd: compute bytes of a tensor described by `sinfo`.
+// Returns 0 for non-tensor (TupleStructInfo, ShapeStructInfo, etc.) or
+// tensors with unknown shape/dtype. Fatals on dynamic-shape (non-IntImm) dims:
+// elmsd v1 only supports static-shape models.
+static int64_t GetStaticTensorSizeBytes(const StructInfo& sinfo) {
+  const auto* tinfo = sinfo.as<TensorStructInfoNode>();
+  if (tinfo == nullptr) return 0;
+  if (tinfo->IsUnknownDtype()) return 0;
+  if (!tinfo->shape.defined()) return 0;
+  const auto* shape_expr = tinfo->shape.value().as<ShapeExprNode>();
+  ICHECK(shape_expr != nullptr)
+      << "elmsd v1 requires static shape; got non-ShapeExpr shape: "
+      << tinfo->shape.value();
+  int64_t numel = 1;
+  for (const PrimExpr& dim : shape_expr->values) {
+    const auto* int_imm = dim.as<IntImmNode>();
+    ICHECK(int_imm != nullptr)
+        << "elmsd v1 requires static shape (all IntImm dims); got non-IntImm dim: " << dim;
+    numel *= int_imm->value;
+  }
+  return numel * tinfo->dtype.bytes() * tinfo->dtype.lanes();
+}
+
+// elmsd: convenience wrapper. Returns 0 if `e` has no struct_info or is not a tensor.
+static int64_t SizeOfTensorExpr(const Expr& e) {
+  auto opt = MatchStructInfo<TensorStructInfo>(e);
+  if (!opt) return 0;
+  return GetStaticTensorSizeBytes(opt.value());
+}
+
 class GraphCreator : public ExprVisitor {
  public:
   /*!
@@ -167,6 +197,9 @@ class GraphCreator : public ExprVisitor {
   void VisitBinding_(const VarBindingNode* binding) final {
     IndexedForwardGraph::Node* node = CreateNode(binding->var.get());
 
+    // elmsd: record output (intermediate result) size from binding var's struct info.
+    node->output_size = SizeOfTensorExpr(binding->var);
+
     // If the variable is not a dataflow variable, it must be the output variable of this dataflow
     // block
     if (!binding->var->IsInstance<DataflowVarNode>()) {
@@ -218,6 +251,11 @@ class GraphCreator : public ExprVisitor {
     }
     // The pattern of the current binding variable node is set to the pattern of this operator.
     SetNodePattern(binding_var_node, pattern);
+    // elmsd: record per-arg input sizes (matches `args` order; non-tensor args -> 0).
+    binding_var_node->input_sizes.reserve(args.size());
+    for (const Expr& arg : args) {
+      binding_var_node->input_sizes.push_back(SizeOfTensorExpr(arg));
+    }
     // Visit all call args
     for (const Expr& arg : args) {
       ICHECK(IsLeafOrTuple(arg))

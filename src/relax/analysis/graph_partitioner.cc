@@ -19,6 +19,8 @@
 
 #include "./graph_partitioner.h"
 
+#include <limits>
+#include <set>
 #include <vector>
 
 namespace tvm {
@@ -98,17 +100,175 @@ DominatorTree::Node* DominatorTree::GetNode(support::Arena* arena,
   return tnode;
 }
 
+// elmsd v1: seed-driven fusion replacing the post-dominator + 3-phase RunFuse loop.
+// See MLC-elmsd/log/20260507_elmsd_v1_design.md.
+//
+// Algorithm (DNNFusion §4.3.2 Listing 1, with TVM OpPattern as the fusibility check):
+//   while seed = pick min-output-size kElemWise op from unfused:
+//     fuse seed's outputs recursively (depth-first)
+//     fuse seed's inputs  recursively (depth-first)
+//     remove fused block from unfused
+//
+// Note: RunFuse / CommitFuse / CheckPath / DominatorTree are no longer called from
+// Partition, but are kept in the source for now (will be removed in a follow-up
+// cleanup once the new algorithm is validated).
 std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
     const IndexedForwardGraph& graph) {
   this->InitGroups(graph);
   if (opt_level_ == 0) return std::move(groups_);
-  // get post dominator tree
-  auto post_dom_tree = DominatorTree::PostDom(arena_, graph);
-  // run fusion algorithm.
-  for (int phase = 0; phase < 3; ++phase) {
-    this->RunFuse(graph, post_dom_tree, phase);
+
+  const size_t N = graph.post_dfs_order.size();
+
+  // Build reverse adjacency once for predecessor walks (IFG only stores forward edges).
+  std::vector<std::vector<IndexedForwardGraph::Node*>> preds(N);
+  for (auto* node : graph.post_dfs_order) {
+    for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
+      preds[link->value.node->index].push_back(node);
+    }
   }
+
+  // Initialize unfused set with all node indices. std::set keeps post-DFS order
+  // ascending, giving deterministic tie-break when multiple seeds share min IRS.
+  std::set<size_t> unfused;
+  for (size_t i = 0; i < N; ++i) unfused.insert(i);
+
+  while (auto* seed = this->ElmsdGenerateSeed(unfused, graph)) {
+    // Forward (successor) walk
+    visited_.clear();
+    visited_.insert(seed);
+    this->ElmsdFuseDirection(seed, seed, graph, /*forward=*/true, preds);
+    // Backward (predecessor) walk
+    visited_.clear();
+    visited_.insert(seed);
+    this->ElmsdFuseDirection(seed, seed, graph, /*forward=*/false, preds);
+    // Remove every node now in seed's group from unfused. Always erase seed itself
+    // so the loop makes progress even if the block did not grow.
+    Group* root = groups_[seed->index]->FindRoot();
+    for (size_t i = 0; i < N; ++i) {
+      if (groups_[i]->FindRoot() == root) unfused.erase(i);
+    }
+  }
+
   return std::move(groups_);
+}
+
+IndexedForwardGraph::Node* GraphPartitioner::ElmsdGenerateSeed(
+    const std::set<size_t>& unfused, const IndexedForwardGraph& graph) {
+  IndexedForwardGraph::Node* best = nullptr;
+  int64_t best_size = std::numeric_limits<int64_t>::max();
+  for (size_t idx : unfused) {
+    auto* n = graph.post_dfs_order[idx];
+    if (n->pattern != kElemWise) continue;
+    // extern_ref is allowed: a kElemWise output binding (e.g. the last relu) is a
+    // valid seed; fusing toward its predecessors mirrors TVM phase 0's behavior of
+    // letting an extern_ref node serve as the dom-parent sink.
+    if (n->output_size <= 0) continue;  // unknown / non-tensor; skip.
+    if (n->output_size < best_size) {
+      best = n;
+      best_size = n->output_size;
+    }
+  }
+  return best;
+}
+
+void GraphPartitioner::ElmsdFuseDirection(
+    IndexedForwardGraph::Node* seed, IndexedForwardGraph::Node* current,
+    const IndexedForwardGraph& graph, bool forward,
+    const std::vector<std::vector<IndexedForwardGraph::Node*>>& preds) {
+  // Collect neighbors in chosen direction (forward=outputs, backward=preds).
+  std::vector<IndexedForwardGraph::Node*> neighbors;
+  if (forward) {
+    for (auto* link = current->outputs.head; link != nullptr; link = link->next) {
+      neighbors.push_back(link->value.node);
+    }
+  } else {
+    neighbors = preds[current->index];
+  }
+
+  for (auto* nbr : neighbors) {
+    if (visited_.count(nbr)) continue;
+    visited_.insert(nbr);
+    // Note: extern_ref is NOT auto-skipped. Param nbrs (extern_ref + kOpaque) are
+    // rejected by ElmsdIsFusible's kOpaque check. Output bindings (extern_ref +
+    // kElemWise / kBroadcast / etc.) are allowed to be absorbed.
+
+    Group* seed_root = groups_[seed->index]->FindRoot();
+    Group* nbr_root = groups_[nbr->index]->FindRoot();
+
+    // Skip neighbors that already belong to a different non-singleton block (i.e.,
+    // a previously processed seed's block). DNNFusion's outer loop iterates with
+    // unfused_ops -= block; the equivalent here is: don't reach across into
+    // committed blocks. When seed has merged with nbr earlier in this same call,
+    // nbr is in visited_ and was skipped above.
+    if (nbr_root != seed_root && nbr_root->num_nodes > 1) continue;
+
+    if (!this->ElmsdIsFusible(seed, nbr)) continue;
+
+    // Cycle prevention for forward walk: a multi-input successor would create a
+    // cross-group cycle if any of its other inputs sits in a different group that
+    // (transitively) depends on seed's block. The conservative rule is to demand
+    // that every input of `nbr` is either in seed's block already or an extern
+    // param (kOpaque). This trades some fusion opportunity for safety; matching
+    // TVM's CheckPath-style multi-path absorption is left to a follow-up branch.
+    if (forward) {
+      bool has_external_input = false;
+      for (auto* p : preds[nbr->index]) {
+        Group* p_root = groups_[p->index]->FindRoot();
+        if (p_root == seed_root) continue;                 // already in block
+        if (p->extern_ref && p->pattern == kOpaque) continue;  // param
+        has_external_input = true;
+        break;
+      }
+      if (has_external_input) continue;
+    }
+
+    // Honor max_fuse_depth_ limit (nbr is currently a singleton if we got here,
+    // so adding it costs 1 node).
+    if (seed_root->num_nodes + nbr_root->num_nodes > max_fuse_depth_) continue;
+
+    this->ElmsdMergeIntoSeedGroup(nbr_root, seed_root);
+    this->ElmsdFuseDirection(seed, nbr, graph, forward, preds);
+  }
+}
+
+bool GraphPartitioner::ElmsdIsFusible(IndexedForwardGraph::Node* seed_node,
+                                      IndexedForwardGraph::Node* nbr) {
+  Group* seed_group = groups_[seed_node->index]->FindRoot();
+  OpPatternKind block_pat = seed_group->pattern;
+  OpPatternKind nbr_pat = nbr->pattern;
+
+  // Reject opaque / tuple at either end.
+  if (block_pat == kOpaque || block_pat == kTuple) return false;
+  if (nbr_pat == kOpaque || nbr_pat == kTuple) return false;
+
+  // Block already contains a heavy op (kCommReduce / kOutEWiseFusable): saturated.
+  if (block_pat > kInjective) return false;
+
+  // Defensive: refuse anything heavier than kOutEWiseFusable as the neighbor
+  // (kTuple/kOpaque already filtered above; this catches future enum additions).
+  if (nbr_pat > kOutEWiseFusable) return false;
+
+  return true;
+}
+
+void GraphPartitioner::ElmsdMergeIntoSeedGroup(Group* nbr_group, Group* seed_root) {
+  nbr_group = nbr_group->FindRoot();
+  seed_root = seed_root->FindRoot();
+  if (nbr_group == seed_root) return;
+  seed_root->num_nodes += nbr_group->num_nodes;
+  seed_root->args_num += nbr_group->args_num;
+  nbr_group->parent = seed_root;
+  if (nbr_group->anchor_ref != nullptr) {
+    ICHECK(seed_root->anchor_ref == nullptr)
+        << "elmsd: merging two anchored groups; ElmsdIsFusible should have prevented this";
+    seed_root->anchor_ref = nbr_group->anchor_ref;
+  }
+  // Pattern: take max. Bypass CombinePattern's fatal because ElmsdIsFusible already
+  // enforces "block.pat <= kInjective when accepting a new neighbor", so the
+  // dangerous double-anchor case never reaches here.
+  if (nbr_group->pattern > seed_root->pattern) {
+    seed_root->pattern = nbr_group->pattern;
+  }
 }
 
 GraphPartitioner::Group* GraphPartitioner::Group::FindRoot() {
