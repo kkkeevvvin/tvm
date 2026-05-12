@@ -27,6 +27,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/diagnostic.h>
 #include <tvm/ir/module.h>
+#include <tvm/relax/dnnfusion_op_class.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/struct_info.h>
@@ -526,6 +527,42 @@ TVM_DLL Expr RemoveAllUnused(Expr expr);
  *       As a result we place it under the relax namespace.
  */
 TVM_DLL OpPatternKind AnalyzeOpPatternKind(const tir::PrimFunc& func);
+
+/*!
+ * \brief Map an OpPatternKind to a DNNFusion DnnfOpClass — heuristic fallback.
+ *
+ * Used by AnnotateDnnfusionClass when no per-op TDnnfOpClass attribute and no
+ * pre-existing "dnnf_op_class" PrimFunc attribute are available. See
+ * docs/wiki/concepts/dnnfusion_taxonomy.md §"與 TVM v0.23.0 OpPatternKind 的
+ * 對應" for the canonical mapping.
+ */
+TVM_DLL DnnfOpClass DnnfClassFromOpPattern(OpPatternKind pattern);
+
+/*!
+ * \brief Infer the DnnfOpClass of a TIR PrimFunc reached via call_tir.
+ *
+ * Reads the PrimFunc's "op_pattern" Integer attribute (assumed populated by
+ * AnnotateTIROpPattern) and applies the OpPatternKind→DnnfOpClass heuristic.
+ * Returns kUnknown if "op_pattern" is missing.
+ */
+TVM_DLL DnnfOpClass InferDnnfClassFromTir(const tir::PrimFunc& func);
+
+/*!
+ * \brief Classify a Relax Call expression into a DNNFusion mapping-type class.
+ *
+ * Lookup priority:
+ *   1. Op::GetAttrMap<Integer>("TDnnfOpClass") for directly-named Relax ops
+ *      (paper Table 2, populated by src/relax/op/dnnfusion_op_class_register.cc).
+ *   2. For call_tir, the caller is responsible for resolving the GlobalVar to
+ *      a PrimFunc and using InferDnnfClassFromTir or reading "dnnf_op_class"
+ *      directly off the PrimFunc — this function returns kUnknown for call_tir
+ *      with a reason explaining the contract.
+ *   3. Otherwise kUnknown.
+ *
+ * Result carries (cls, source, reason) for auditability — see
+ * docs/wiki/concepts/dnnfusion_taxonomy.md §實作守則.
+ */
+TVM_DLL DnnfClassification ClassifyDnnfOp(const Call& call);
 
 /*!
  * \brief Check if the given PrimFunc is essentially doing a reshape operation.

@@ -46,3 +46,10 @@ from .analysis import (
     well_formed,
 )
 from .estimate_memory_usage import estimate_memory_usage
+from .dnnfusion import (
+    DnnfOpClass,
+    DnnfClassSource,
+    classify_dnnf_op,
+    dnnf_class_from_op_pattern,
+    infer_dnnf_class_from_tir,
+)

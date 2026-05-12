@@ -785,6 +785,24 @@ def AnnotateTIROpPattern() -> tvm.ir.transform.Pass:
     return _ffi_api.AnnotateTIROpPattern()  # type: ignore
 
 
+def AnnotateDnnfusionClass() -> tvm.ir.transform.Pass:
+    """Annotate DNNFusion mapping-type class on TIR PrimFuncs.
+
+    Reads each PrimFunc's existing "op_pattern" Integer attribute (assumed
+    populated by AnnotateTIROpPattern) and writes a "dnnf_op_class" Integer
+    attribute derived via the DNNFusion fallback heuristic.
+
+    Opt-in pass: not added to any default Relax pipeline. Drivers must call
+    it explicitly after AnnotateTIROpPattern. See
+    docs/wiki/concepts/dnnfusion_taxonomy.md for the canonical taxonomy.
+
+    Returns
+    -------
+    ret: tvm.ir.transform.Pass
+    """
+    return _ffi_api.AnnotateDnnfusionClass()  # type: ignore
+
+
 def FuseOps(fuse_opt_level=-1) -> tvm.ir.transform.Pass:
     """This pass groups bindings in a dataflow block of Relax functions and generate a new grouped
     Relax function for each group, according to the fusion algorithm described in the pass
