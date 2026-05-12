@@ -600,3 +600,11 @@ def computable_at_compile_time(func: Function) -> List[Var]:
         order of their occurrence within the function.
     """
     return _ffi_api.computable_at_compile_time(func)  # type: ignore
+
+
+def dump_indexed_forward_graph(mod: IRModule) -> str:
+    """Build the IndexedForwardGraph that FuseOps uses (Step 1) and dump it as text.
+
+    Each line: node[i] pattern=<kind> [extern_ref] outputs=[idx(pattern), ...] ref=<expr>
+    """
+    return _ffi_api.DumpIndexedForwardGraph(mod)  # type: ignore
