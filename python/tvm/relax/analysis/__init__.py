@@ -28,6 +28,7 @@ from .analysis import (
     defined_symbolic_vars,
     derive_call_ret_struct_info,
     detect_recursion,
+    dump_indexed_forward_graph,
     erase_to_well_defined,
     free_symbolic_vars,
     free_vars,
