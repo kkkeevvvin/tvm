@@ -1395,6 +1395,48 @@ IRModule FuseOpsByPattern(const tvm::ffi::Array<transform::FusionPattern>& patte
   return mod;
 }
 
+namespace {
+
+int64_t StructInfoBytes(const StructInfo& sinfo) {
+  if (const auto* tsi = sinfo.as<TensorStructInfoNode>()) {
+    const auto* shape = tsi->shape.as<ShapeExprNode>();
+    if (shape == nullptr) return -1;
+    int64_t count = 1;
+    for (const PrimExpr& v : shape->values) {
+      const auto* imm = v.as<IntImmNode>();
+      if (imm == nullptr) return -1;
+      count *= imm->value;
+    }
+    int64_t bytes_per = static_cast<int64_t>(tsi->dtype.bytes()) *
+                        static_cast<int64_t>(tsi->dtype.lanes());
+    return count * bytes_per;
+  }
+  if (const auto* tup = sinfo.as<TupleStructInfoNode>()) {
+    int64_t total = 0;
+    for (const StructInfo& f : tup->fields) {
+      int64_t b = StructInfoBytes(f);
+      if (b < 0) return -1;
+      total += b;
+    }
+    return total;
+  }
+  return -1;
+}
+
+int64_t ComputeNodeOutputBytes(const tvm::Object* ref) {
+  if (ref == nullptr) return -1;
+  const StructInfoNode* sinfo_node = nullptr;
+  if (ref->IsInstance<VarNode>()) {
+    sinfo_node = static_cast<const VarNode*>(ref)->struct_info_.as<StructInfoNode>();
+  } else if (ref->IsInstance<ConstantNode>()) {
+    sinfo_node = static_cast<const ConstantNode*>(ref)->struct_info_.as<StructInfoNode>();
+  }
+  if (sinfo_node == nullptr) return -1;
+  return StructInfoBytes(ffi::GetRef<StructInfo>(sinfo_node));
+}
+
+}  // namespace
+
 ffi::String DumpIndexedForwardGraph(IRModule mod) {
   support::Arena arena;
   IndexedForwardGraph graph = GraphCreator::Create(mod, &arena);
@@ -1426,9 +1468,12 @@ ffi::String DumpIndexedForwardGraph(IRModule mod) {
       }
       if (ref_str.size() > 160) ref_str = ref_str.substr(0, 160) + "...";
     }
+    int64_t bytes = ComputeNodeOutputBytes(node->ref);
     os << "node[" << i << "] pattern=" << pattern_name(node->pattern)
        << (node->extern_ref ? " extern_ref" : "")
-       << " outputs=[";
+       << " bytes=";
+    if (bytes < 0) os << "?"; else os << bytes;
+    os << " outputs=[";
     bool first = true;
     for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
       if (!first) os << ", ";
