@@ -1423,14 +1423,12 @@ int64_t StructInfoBytes(const StructInfo& sinfo) {
   return -1;
 }
 
-int64_t ComputeNodeOutputBytes(const tvm::Object* ref) {
-  if (ref == nullptr) return -1;
-  const StructInfoNode* sinfo_node = nullptr;
-  if (ref->IsInstance<VarNode>()) {
-    sinfo_node = static_cast<const VarNode*>(ref)->struct_info_.as<StructInfoNode>();
-  } else if (ref->IsInstance<ConstantNode>()) {
-    sinfo_node = static_cast<const ConstantNode*>(ref)->struct_info_.as<StructInfoNode>();
-  }
+int64_t ComputeNodeOutputBytes(const tvm::Object* node_ref) {
+  if (node_ref == nullptr || !node_ref->IsInstance<ExprNode>()) return -1;
+  // GraphCreator only inserts Vars and Constants; both derive from ExprNode,
+  // which is where struct_info_ lives.
+  const auto* sinfo_node =
+      static_cast<const ExprNode*>(node_ref)->struct_info_.as<StructInfoNode>();
   if (sinfo_node == nullptr) return -1;
   return StructInfoBytes(ffi::GetRef<StructInfo>(sinfo_node));
 }
@@ -1469,11 +1467,11 @@ ffi::String DumpIndexedForwardGraph(IRModule mod) {
       if (ref_str.size() > 160) ref_str = ref_str.substr(0, 160) + "...";
     }
     int64_t bytes = ComputeNodeOutputBytes(node->ref);
+    std::string bytes_str = bytes < 0 ? "?" : std::to_string(bytes);
     os << "node[" << i << "] pattern=" << pattern_name(node->pattern)
        << (node->extern_ref ? " extern_ref" : "")
-       << " bytes=";
-    if (bytes < 0) os << "?"; else os << bytes;
-    os << " outputs=[";
+       << " bytes=" << bytes_str
+       << " outputs=[";
     bool first = true;
     for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
       if (!first) os << ", ";
