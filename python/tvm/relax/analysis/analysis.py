@@ -600,14 +600,3 @@ def computable_at_compile_time(func: Function) -> List[Var]:
         order of their occurrence within the function.
     """
     return _ffi_api.computable_at_compile_time(func)  # type: ignore
-
-
-def dump_indexed_forward_graph(mod: IRModule) -> str:
-    """Run FuseOps' GraphCreator on `mod` and return the IndexedForwardGraph as text.
-
-    The output lists post-DFS nodes with their OpPatternKind, extern_ref flag,
-    outgoing edges (target index + edge pattern), and a one-line preview of the
-    referenced Relax node. Intended for debugging fusion decisions without
-    patching fuse_ops.cc.
-    """
-    return _ffi_api.DumpIndexedForwardGraph(mod)  # type: ignore
