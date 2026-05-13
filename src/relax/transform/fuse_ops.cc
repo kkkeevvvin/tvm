@@ -1395,6 +1395,56 @@ IRModule FuseOpsByPattern(const tvm::ffi::Array<transform::FusionPattern>& patte
   return mod;
 }
 
+ffi::String DumpIndexedForwardGraph(IRModule mod) {
+  support::Arena arena;
+  IndexedForwardGraph graph = GraphCreator::Create(mod, &arena);
+
+  auto pattern_name = [](OpPatternKind p) -> const char* {
+    switch (p) {
+      case kElemWise: return "kElemWise";
+      case kBroadcast: return "kBroadcast";
+      case kInjective: return "kInjective";
+      case kCommReduce: return "kCommReduce";
+      case kOutEWiseFusable: return "kOutEWiseFusable";
+      case kTuple: return "kTuple";
+      case kOpaque: return "kOpaque";
+      default: return "kUnknown";
+    }
+  };
+
+  std::ostringstream os;
+  os << "IndexedForwardGraph: " << graph.post_dfs_order.size() << " nodes\n";
+  for (size_t i = 0; i < graph.post_dfs_order.size(); ++i) {
+    IndexedForwardGraph::Node* node = graph.post_dfs_order[i];
+    std::string ref_str = "<null>";
+    if (node->ref != nullptr) {
+      std::ostringstream rs;
+      rs << ffi::GetRef<ObjectRef>(node->ref);
+      ref_str = rs.str();
+      for (auto& c : ref_str) {
+        if (c == '\n') c = ' ';
+      }
+      if (ref_str.size() > 160) ref_str = ref_str.substr(0, 160) + "...";
+    }
+    os << "node[" << i << "] pattern=" << pattern_name(node->pattern)
+       << (node->extern_ref ? " extern_ref" : "")
+       << " outputs=[";
+    bool first = true;
+    for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
+      if (!first) os << ", ";
+      os << link->value.node->index << "(" << pattern_name(link->value.pattern) << ")";
+      first = false;
+    }
+    os << "] ref=" << ref_str << "\n";
+  }
+  return ffi::String(os.str());
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("relax.analysis.DumpIndexedForwardGraph", DumpIndexedForwardGraph);
+}
+
 namespace transform {
 
 FusionPattern::FusionPattern(ffi::String name, DFPattern pattern,
