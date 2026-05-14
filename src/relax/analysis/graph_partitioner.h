@@ -80,16 +80,30 @@ class IndexedForwardGraph {
 
   /*! \brief Dump the graph into string. */
   void DebugDump() const {
+    auto pattern_name = [](OpPatternKind p) -> const char* {
+      switch (p) {
+        case kElemWise: return "kElemWise";
+        case kBroadcast: return "kBroadcast";
+        case kInjective: return "kInjective";
+        case kCommReduce: return "kCommReduce";
+        case kOutEWiseFusable: return "kOutEWiseFusable";
+        case kTuple: return "kTuple";
+        case kOpaque: return "kOpaque";
+        default: return "kUnknown";
+      }
+    };
     std::ostringstream os;
     for (size_t i = 0; i < post_dfs_order.size(); ++i) {
       Node* node = post_dfs_order[i];
-      os << "node[" << i << "], " << ffi::GetRef<ObjectRef>(node->ref) << " outputs=[";
+      os << "node[" << i << "], " << ffi::GetRef<ObjectRef>(node->ref)
+         << " pattern=" << pattern_name(node->pattern) << " outputs=[";
       for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
         os << link->value.node->index << ", ";
       }
       os << "]\n";
     }
-    LOG(INFO) << os.str();
+    LOG(INFO) << "\nIndexedForwardGraph: " << post_dfs_order.size() << " nodes\n"
+              << os.str();
   }
 };
 
@@ -298,6 +312,9 @@ class GraphPartitioner {
 
   // execute the fusion algorithm.
   void RunFuse(const IndexedForwardGraph& graph, const DominatorTree& post_dom_tree, int phase);
+
+  // test
+  void RunMyFuse(const IndexedForwardGraph& graph);
 };
 
 }  // namespace relax
