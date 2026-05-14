@@ -70,6 +70,8 @@ class IndexedForwardGraph {
     bool extern_ref{false};
     /*! \brief The general pattern in the node */
     OpPatternKind pattern{kOpaque};
+    /*! \brief Output size in bytes; -1 if unknown / dynamic / opaque sinfo. */
+    int64_t output_size{-1};
     /*! \brief The outputs of the node. */
     LinkedList<Edge> outputs;
   };
