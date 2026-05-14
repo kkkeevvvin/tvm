@@ -317,6 +317,20 @@ class GraphPartitioner {
 
   // execute the fusion algorithm.
   void RunFuse(const IndexedForwardGraph& graph, const DominatorTree& post_dom_tree, int phase);
+
+  /*!
+   * \brief Execute the DNNFusion-based fusion algorithm.
+   *
+   * Alternative fusion path selected when opt_level_ == 6 (driven from Python
+   * via relax.transform.FuseOps(fuse_opt_level=6)), replacing the default
+   * 3-phase RunFuse pipeline. Instead of the dominator-tree-based grouping, it
+   * works directly off the cached pattern / output_size on each
+   * IndexedForwardGraph::Node, seeding from element-wise ops and expanding into
+   * successors / predecessors.
+   *
+   * \param graph The indexed forward graph to fuse over.
+   */
+  void RunDNNFuse(const IndexedForwardGraph& graph);
 };
 
 }  // namespace relax
