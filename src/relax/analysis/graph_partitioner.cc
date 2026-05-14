@@ -102,6 +102,10 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
     const IndexedForwardGraph& graph) {
   this->InitGroups(graph);
   if (opt_level_ == 0) return std::move(groups_);
+  if (opt_level_ == 6) {
+    this->RunMyFuse(graph);
+    return std::move(groups_);
+  }
   // get post dominator tree
   auto post_dom_tree = DominatorTree::PostDom(arena_, graph);
   // run fusion algorithm.
@@ -438,6 +442,10 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
       ICHECK(group_node->pattern == kCommReduce);
     }
   }
+}
+
+void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
+  graph.DebugDump();
 }
 
 }  // namespace relax

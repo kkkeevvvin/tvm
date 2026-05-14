@@ -317,6 +317,9 @@ class GraphPartitioner {
 
   // execute the fusion algorithm.
   void RunFuse(const IndexedForwardGraph& graph, const DominatorTree& post_dom_tree, int phase);
+
+  // test
+  void RunMyFuse(const IndexedForwardGraph& graph);
 };
 
 }  // namespace relax
