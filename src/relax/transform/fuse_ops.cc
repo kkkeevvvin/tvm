@@ -99,6 +99,46 @@ constexpr uint32_t kMaxFusedOps = 256;
 
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.max_depth", Integer);
 
+namespace {
+
+int64_t StructInfoBytes(const StructInfo& sinfo) {
+  if (const auto* tensor_sinfo = sinfo.as<TensorStructInfoNode>()) {
+    const auto* shape = tensor_sinfo->shape.as<ShapeExprNode>();
+    if (shape == nullptr) return -1;
+    int64_t num_elements = 1;
+    for (const PrimExpr& v : shape->values) {
+      const auto* imm = v.as<IntImmNode>();
+      if (imm == nullptr) return -1;
+      num_elements *= imm->value;
+    }
+    int64_t bytes_per = static_cast<int64_t>(tensor_sinfo->dtype.bytes()) *
+                        static_cast<int64_t>(tensor_sinfo->dtype.lanes());
+    return num_elements * bytes_per;
+  }
+  if (const auto* tuple_sinfo = sinfo.as<TupleStructInfoNode>()) {
+    int64_t total = 0;
+    for (const StructInfo& f : tuple_sinfo->fields) {
+      int64_t field_bytes = StructInfoBytes(f);
+      if (field_bytes < 0) return -1;
+      total += field_bytes;
+    }
+    return total;
+  }
+  return -1;
+}
+
+int64_t ComputeNodeOutputBytes(const tvm::Object* node_ref) {
+  if (node_ref == nullptr || !node_ref->IsInstance<ExprNode>()) return -1;
+  // GraphCreator only inserts Vars and Constants; both derive from ExprNode,
+  // which is where struct_info_ lives.
+  const auto* sinfo_node =
+      static_cast<const ExprNode*>(node_ref)->struct_info_.as<StructInfoNode>();
+  if (sinfo_node == nullptr) return -1;
+  return StructInfoBytes(ffi::GetRef<StructInfo>(sinfo_node));
+}
+
+}  // namespace
+
 class GraphCreator : public ExprVisitor {
  public:
   /*!
@@ -323,6 +363,7 @@ class GraphCreator : public ExprVisitor {
 
     node->ref = key;
     node->index = graph_.post_dfs_order.size();
+    node->output_size = ComputeNodeOutputBytes(key);
     graph_.post_dfs_order.push_back(node);
   }
 
@@ -1395,46 +1436,6 @@ IRModule FuseOpsByPattern(const tvm::ffi::Array<transform::FusionPattern>& patte
   return mod;
 }
 
-namespace {
-
-int64_t StructInfoBytes(const StructInfo& sinfo) {
-  if (const auto* tensor_sinfo = sinfo.as<TensorStructInfoNode>()) {
-    const auto* shape = tensor_sinfo->shape.as<ShapeExprNode>();
-    if (shape == nullptr) return -1;
-    int64_t num_elements = 1;
-    for (const PrimExpr& v : shape->values) {
-      const auto* imm = v.as<IntImmNode>();
-      if (imm == nullptr) return -1;
-      num_elements *= imm->value;
-    }
-    int64_t bytes_per = static_cast<int64_t>(tensor_sinfo->dtype.bytes()) *
-                        static_cast<int64_t>(tensor_sinfo->dtype.lanes());
-    return num_elements * bytes_per;
-  }
-  if (const auto* tuple_sinfo = sinfo.as<TupleStructInfoNode>()) {
-    int64_t total = 0;
-    for (const StructInfo& f : tuple_sinfo->fields) {
-      int64_t field_bytes = StructInfoBytes(f);
-      if (field_bytes < 0) return -1;
-      total += field_bytes;
-    }
-    return total;
-  }
-  return -1;
-}
-
-int64_t ComputeNodeOutputBytes(const tvm::Object* node_ref) {
-  if (node_ref == nullptr || !node_ref->IsInstance<ExprNode>()) return -1;
-  // GraphCreator only inserts Vars and Constants; both derive from ExprNode,
-  // which is where struct_info_ lives.
-  const auto* sinfo_node =
-      static_cast<const ExprNode*>(node_ref)->struct_info_.as<StructInfoNode>();
-  if (sinfo_node == nullptr) return -1;
-  return StructInfoBytes(ffi::GetRef<StructInfo>(sinfo_node));
-}
-
-}  // namespace
-
 ffi::String DumpIndexedForwardGraph(IRModule mod) {
   support::Arena arena;
   IndexedForwardGraph graph = GraphCreator::Create(mod, &arena);
@@ -1466,7 +1467,7 @@ ffi::String DumpIndexedForwardGraph(IRModule mod) {
       }
       if (ref_str.size() > 160) ref_str = ref_str.substr(0, 160) + "...";
     }
-    int64_t bytes = ComputeNodeOutputBytes(node->ref);
+    int64_t bytes = node->output_size;
     std::string bytes_str = bytes < 0 ? "?" : std::to_string(bytes);
     os << "node[" << i << "] pattern=" << pattern_name(node->pattern)
        << (node->extern_ref ? " extern_ref" : "")
