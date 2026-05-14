@@ -1398,25 +1398,25 @@ IRModule FuseOpsByPattern(const tvm::ffi::Array<transform::FusionPattern>& patte
 namespace {
 
 int64_t StructInfoBytes(const StructInfo& sinfo) {
-  if (const auto* tsi = sinfo.as<TensorStructInfoNode>()) {
-    const auto* shape = tsi->shape.as<ShapeExprNode>();
+  if (const auto* tensor_sinfo = sinfo.as<TensorStructInfoNode>()) {
+    const auto* shape = tensor_sinfo->shape.as<ShapeExprNode>();
     if (shape == nullptr) return -1;
-    int64_t count = 1;
+    int64_t num_elements = 1;
     for (const PrimExpr& v : shape->values) {
       const auto* imm = v.as<IntImmNode>();
       if (imm == nullptr) return -1;
-      count *= imm->value;
+      num_elements *= imm->value;
     }
-    int64_t bytes_per = static_cast<int64_t>(tsi->dtype.bytes()) *
-                        static_cast<int64_t>(tsi->dtype.lanes());
-    return count * bytes_per;
+    int64_t bytes_per = static_cast<int64_t>(tensor_sinfo->dtype.bytes()) *
+                        static_cast<int64_t>(tensor_sinfo->dtype.lanes());
+    return num_elements * bytes_per;
   }
-  if (const auto* tup = sinfo.as<TupleStructInfoNode>()) {
+  if (const auto* tuple_sinfo = sinfo.as<TupleStructInfoNode>()) {
     int64_t total = 0;
-    for (const StructInfo& f : tup->fields) {
-      int64_t b = StructInfoBytes(f);
-      if (b < 0) return -1;
-      total += b;
+    for (const StructInfo& f : tuple_sinfo->fields) {
+      int64_t field_bytes = StructInfoBytes(f);
+      if (field_bytes < 0) return -1;
+      total += field_bytes;
     }
     return total;
   }
