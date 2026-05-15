@@ -136,10 +136,10 @@ bool GraphPartitioner::CheckPath_(IndexedForwardGraph::Node* src, IndexedForward
                                   F fcond) {
   if (visited_.count(src)) return true;
   visited_.insert(src);
-  Group* gnode = groups_[src->index];
-  ICHECK(gnode != nullptr);
-  gnode = gnode->FindRoot();
-  if (!fcond(gnode->pattern, src == sink)) return false;
+  Group* group_node = groups_[src->index];
+  ICHECK(group_node != nullptr);
+  group_node = group_node->FindRoot();
+  if (!fcond(group_node->pattern, src == sink)) return false;
   if (src == sink) return true;
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     if (!CheckPath_(link->value.node, sink, fcond)) return false;
@@ -192,10 +192,10 @@ void GraphPartitioner::CommitFuse_(IndexedForwardGraph::Node* src, IndexedForwar
   if (src == sink) return;
   if (visited_.count(src)) return;
   visited_.insert(src);
-  Group* gnode = groups_[src->index];
-  ICHECK(gnode != nullptr);
+  Group* group_node = groups_[src->index];
+  ICHECK(group_node != nullptr);
   // merge the current group to the parent if possible.
-  MergeFromTo(gnode, target);
+  MergeFromTo(group_node, target);
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     CommitFuse_(link->value.node, sink, target);
   }
@@ -220,9 +220,9 @@ size_t GraphPartitioner::CountNodesUptoSink_(IndexedForwardGraph::Node* src,
                                              IndexedForwardGraph::Node* sink) {
   if (src == sink || visited_.count(src)) return 0;
   visited_.insert(src);
-  Group* gnode = groups_[src->index];
-  ICHECK(gnode != nullptr);
-  auto sum = gnode->num_nodes;
+  Group* group_node = groups_[src->index];
+  ICHECK(group_node != nullptr);
+  auto sum = group_node->num_nodes;
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     sum += CountNodesUptoSink_(link->value.node, sink);
   }
@@ -240,10 +240,10 @@ size_t GraphPartitioner::CountFusedNodesWithNewChild(IndexedForwardGraph::Node* 
 size_t GraphPartitioner::CountArgs_(IndexedForwardGraph::Node* src,
                                     const IndexedForwardGraph& graph, bool update_postpone) {
   std::unordered_set<Group*> visited_groups;
-  Group* gnode = groups_[src->index];
-  ICHECK(gnode != nullptr);
-  auto sum = gnode->args_num;
-  visited_groups.insert(gnode->FindRoot());
+  Group* group_node = groups_[src->index];
+  ICHECK(group_node != nullptr);
+  auto sum = group_node->args_num;
+  visited_groups.insert(group_node->FindRoot());
   auto calc_args_number = [this, src, &graph, &visited_groups,
                            update_postpone](const Expr& arg) -> size_t {
     if (arg.as<VarNode>()) return 0;
