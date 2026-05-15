@@ -32,6 +32,13 @@ void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* suc
   LOG(INFO) << "  successor of node[" << sp->index << "]:"
             << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
             << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
+  // dnnf: Step 2.1: check the mapping relationship
+  // dnnf:     relation = mapping_check ( op , successor )
+  // TVM analog: CombinePattern's hard guard — two patterns stricter than
+  // kBroadcast (both in {kInjective, kCommReduce, kOutEWiseFusable, kTuple,
+  // kOpaque}) cannot be merged into one group.
+  bool relation = !(sp->pattern > kBroadcast && successor->pattern > kBroadcast);
+  LOG(INFO) << "    relation = " << (relation ? "true" : "false");
   (void)block;
 }
 
