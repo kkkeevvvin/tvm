@@ -19,10 +19,33 @@
 
 #include "./graph_partitioner.h"
 
+#include <utility>
 #include <vector>
 
 namespace tvm {
 namespace relax {
+
+namespace {
+// Return the kElemWise node with the smallest known output_size in post-DFS
+// order, along with its index in graph.post_dfs_order. Nodes with
+// output_size < 0 (dynamic / opaque sinfo) are skipped. Ties keep the
+// earliest-encountered node. Returns {nullptr, 0} when no candidate exists.
+std::pair<IndexedForwardGraph::Node*, size_t> FindMinElemWise(
+    const IndexedForwardGraph& graph) {
+  IndexedForwardGraph::Node* min_node = nullptr;
+  size_t min_index = 0;
+  for (size_t i = 0; i < graph.post_dfs_order.size(); ++i) {
+    IndexedForwardGraph::Node* node = graph.post_dfs_order[i];
+    if (node->pattern != kElemWise) continue;
+    if (node->output_size < 0) continue;
+    if (min_node == nullptr || node->output_size < min_node->output_size) {
+      min_node = node;
+      min_index = i;
+    }
+  }
+  return {min_node, min_index};
+}
+}  // namespace
 
 DominatorTree DominatorTree::PostDom(support::Arena* arena, const IndexedForwardGraph& graph) {
   DominatorTree tree;
@@ -463,6 +486,15 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
 
 void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
+
+  auto [min_node, min_index] = FindMinElemWise(graph);
+  if (min_node == nullptr) {
+    LOG(INFO) << "\nkElemWise min-output_size: (none with known size)";
+  } else {
+    LOG(INFO) << "\nkElemWise min-output_size:\n"
+              << "node[" << min_index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
+              << " bytes=" << min_node->output_size;
+  }
 }
 
 }  // namespace relax
