@@ -19,6 +19,7 @@
 
 #include "./graph_partitioner.h"
 
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -26,24 +27,24 @@ namespace tvm {
 namespace relax {
 
 namespace {
-// Return the kElemWise node with the smallest known output_size in post-DFS
-// order, along with its index in graph.post_dfs_order. Nodes with
-// output_size < 0 (dynamic / opaque sinfo) are skipped. Ties keep the
-// earliest-encountered node. Returns {nullptr, 0} when no candidate exists.
+// Return the kElemWise node in `unfused_ops` with the smallest known
+// output_size, along with its post-DFS index (node->index). Nodes with
+// output_size < 0 (dynamic / opaque sinfo) are skipped. Ties break on the
+// smaller post-DFS index so the result is deterministic despite the
+// unordered_set's unspecified iteration order. Returns {nullptr, 0} when no
+// candidate exists.
 std::pair<IndexedForwardGraph::Node*, size_t> FindMinElemWise(
-    const IndexedForwardGraph& graph) {
+    const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
-  size_t min_index = 0;
-  for (size_t i = 0; i < graph.post_dfs_order.size(); ++i) {
-    IndexedForwardGraph::Node* node = graph.post_dfs_order[i];
+  for (IndexedForwardGraph::Node* node : unfused_ops) {
     if (node->pattern != kElemWise) continue;
     if (node->output_size < 0) continue;
-    if (min_node == nullptr || node->output_size < min_node->output_size) {
+    if (min_node == nullptr || node->output_size < min_node->output_size ||
+        (node->output_size == min_node->output_size && node->index < min_node->index)) {
       min_node = node;
-      min_index = i;
     }
   }
-  return {min_node, min_index};
+  return {min_node, min_node ? min_node->index : 0};
 }
 }  // namespace
 
@@ -487,12 +488,16 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
 void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
 
-  auto [min_node, min_index] = FindMinElemWise(graph);
+  std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
+      graph.post_dfs_order.begin(), graph.post_dfs_order.end());
+  LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
+
+  auto [min_node, min_index] = FindMinElemWise(unfused_ops);
   if (min_node == nullptr) {
     LOG(INFO) << "\nkElemWise min-output_size: (none with known size)";
   } else {
-    LOG(INFO) << "\nkElemWise min-output_size:\n"
-              << "node[" << min_index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
+    LOG(INFO) << "\nkElemWise min-output_size:"
+              << " node[" << min_index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
               << " bytes=" << min_node->output_size;
   }
 }
