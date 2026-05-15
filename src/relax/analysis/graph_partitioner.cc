@@ -488,17 +488,22 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
 void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
 
+  // dnnf: unfused_ops = all_operaters
   std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
       graph.post_dfs_order.begin(), graph.post_dfs_order.end());
   LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
 
   while (true) {
+    // dnnf: generate seed
     auto [min_node, min_index] = FindMinElemWise(unfused_ops);
     if (min_node == nullptr) break;
+    // dnnf: block = [min_node]
+    std::unordered_set<IndexedForwardGraph::Node*> block{min_node};
     LOG(INFO) << "\nkElemWise op with min output_size:"
               << " node[" << min_index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
               << " bytes=" << min_node->output_size;
-    unfused_ops.erase(min_node);
+    // dnnf: unfused_ops = unfused_ops - block
+    for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
 }
 
