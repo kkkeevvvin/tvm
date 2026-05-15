@@ -492,13 +492,13 @@ void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
       graph.post_dfs_order.begin(), graph.post_dfs_order.end());
   LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
 
-  auto [min_node, min_index] = FindMinElemWise(unfused_ops);
-  if (min_node == nullptr) {
-    LOG(INFO) << "\nkElemWise min-output_size: (none with known size)";
-  } else {
-    LOG(INFO) << "\nkElemWise min-output_size:"
+  while (true) {
+    auto [min_node, min_index] = FindMinElemWise(unfused_ops);
+    if (min_node == nullptr) break;
+    LOG(INFO) << "\nkElemWise op with min output_size:"
               << " node[" << min_index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
               << " bytes=" << min_node->output_size;
+    unfused_ops.erase(min_node);
   }
 }
 
