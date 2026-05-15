@@ -362,8 +362,8 @@ void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_n
     // Now we know the tuple has been fused into subsequent injective ops.
     // dom_root_group can also be tuple, as in inception layers — TryFuse's
     // CheckPath is needed to avoid fusing two intermediate tuples.
-    TryFuse(graph_node, dom_node->parent->gnode,
-            [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; });
+    auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
+    TryFuse(graph_node, dom_node->parent->gnode, fcond);
   }
 }
 
@@ -388,8 +388,8 @@ void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node
       // relation is elemwise and all intermediate ops are still broadcast.
       if (phase != 0) return;
       if (dom_node->pattern != kElemWise) return;
-      TryFuse(graph_node, dom_parent_gnode,
-              [](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; });
+      auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; };
+      TryFuse(graph_node, dom_parent_gnode, fcond);
       return;
     }
     case kElemWise:
@@ -398,19 +398,20 @@ void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node
       // Intermediate ops on parallel branches stay <= injective; the sink may
       // already be fused to a kOutEWiseFusable / kCommReduce / kInjective anchor.
       if (dom_node->pattern > kInjective && dom_node->pattern != kCommReduce) return;
-      TryFuse(graph_node, dom_parent_gnode, [](OpPatternKind kind, bool is_sink) {
+      auto fcond = [](OpPatternKind kind, bool is_sink) {
         if (!is_sink) return kind <= kInjective;
         return kind <= kBroadcast || kind == kCommReduce || kind == kInjective ||
                kind == kOutEWiseFusable;
-      });
+      };
+      TryFuse(graph_node, dom_parent_gnode, fcond);
       return;
     }
     case kInjective:
     case kTuple: {
       // Deferred to phase 1 so conv2d (phase 0) finishes fusing first.
       if (phase != 1) return;
-      TryFuse(graph_node, dom_parent_gnode,
-              [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; });
+      auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
+      TryFuse(graph_node, dom_parent_gnode, fcond);
       return;
     }
     case kCommReduce:
