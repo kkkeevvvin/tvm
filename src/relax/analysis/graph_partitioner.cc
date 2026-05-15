@@ -27,11 +27,14 @@ namespace tvm {
 namespace relax {
 
 namespace {
-// Return the kElemWise node in `unfused_ops` with the smallest known
-// output_size. Nodes with output_size < 0 (dynamic / opaque sinfo) are
-// skipped. Ties break on the smaller post-DFS index (node->index) so the
-// result is deterministic despite the unordered_set's unspecified iteration
-// order. Returns nullptr when no candidate exists.
+void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
+                   std::unordered_set<IndexedForwardGraph::Node*>* block) {
+  LOG(INFO) << "  successor of node[" << sp->index << "]:"
+            << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
+            << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
+  (void)block;
+}
+
 IndexedForwardGraph::Node* FindMinElemWise(
     const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
@@ -502,17 +505,9 @@ void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
               << " node[" << min_node->index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
               << " bytes=" << min_node->output_size;
     // dnnf: for successor in successors ( sp ) :
-    {
-      std::ostringstream succ_os;
-      size_t succ_count = 0;
-      for (auto* link = min_node->outputs.head; link != nullptr; link = link->next) {
-        IndexedForwardGraph::Node* succ = link->value.node;
-        succ_os << " node[" << succ->index << "] " << ffi::GetRef<ObjectRef>(succ->ref)
-                << " (pattern=" << succ->pattern << ", bytes=" << succ->output_size << ")\n";
-        ++succ_count;
-      }
-      LOG(INFO) << "  successors of node[" << min_node->index << "]: " << succ_count << "\n"
-                << succ_os.str();
+    for (auto* link = min_node->outputs.head; link != nullptr; link = link->next) {
+      // dnnf: fuse_successor ( sp , successor , block )
+      FuseSuccessor(min_node, link->value.node, &block);
     }
 
     // dnnf: unfused_ops = unfused_ops - block
