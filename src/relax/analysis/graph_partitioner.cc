@@ -497,9 +497,15 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // dnnf: # Step 2.2: check the constraint requirement
   // dnnf:     if not check_constraint ( op , successor , block ) : return
   // TVM analog: CheckPath walks sp -> successor and verifies every
-  // intermediate group's pattern satisfies fcond. Matches RunFuse's phase-0
-  // gate.
-  auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
+  // intermediate group's pattern satisfies fcond. We take the union of every
+  // phase's fcond in FuseToPostDominator/FuseInjectiveIntoTuple — intermediate
+  // path stays <= kInjective (most permissive non-sink rule any phase uses),
+  // sink accepts anything <= kOutEWiseFusable (the kElemWise/kBroadcast sink
+  // rule, which is the loosest). kTuple/kOpaque sinks still rejected.
+  auto fcond = [](OpPatternKind kind, bool is_sink) {
+    if (is_sink) return kind <= kOutEWiseFusable;
+    return kind <= kInjective;
+  };
   if (!CheckPath(sp, successor, fcond)) {
     LOG(INFO) << "    CheckPath: false (path-safety rejected)";
     return;
