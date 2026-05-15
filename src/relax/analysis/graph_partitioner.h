@@ -325,11 +325,12 @@ class GraphPartitioner {
 
   // Phase-2 rule: fuse injective ops into intermediate tuples.
   void FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_node, Group* group_node,
-                              DominatorTree::Node* dom_node, size_t dom_parent_gindex);
+                              DominatorTree::Node* dom_node, size_t dom_parent_group_index);
 
   // Phase-0/1 rule: try to fuse graph_node into its post-dominator parent.
   void FuseToPostDominator(IndexedForwardGraph::Node* graph_node, Group* group_node,
-                           DominatorTree::Node* dom_node, size_t dom_parent_gindex, int phase);
+                           DominatorTree::Node* dom_node, size_t dom_parent_group_index,
+                           int phase);
 
   // test
   void RunMyFuse(const IndexedForwardGraph& graph);

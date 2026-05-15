@@ -344,9 +344,9 @@ void GraphPartitioner::ProcessPostponedFusing(IndexedForwardGraph::Node* graph_n
 
 void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_node,
                                               Group* group_node, DominatorTree::Node* dom_node,
-                                              size_t dom_parent_gindex) {
+                                              size_t dom_parent_group_index) {
   if (group_node->pattern > kInjective) return;
-  Group* dom_parent_group = groups_[dom_parent_gindex];
+  Group* dom_parent_group = groups_[dom_parent_group_index];
   Group* dom_root_group = dom_parent_group->FindRoot();
   // If dom node group has a tuple as its root, we do not fuse tuple fields into it
   if (dom_root_group->pattern == kTuple) return;
@@ -363,18 +363,18 @@ void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_n
 
 void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node,
                                            Group* group_node, DominatorTree::Node* dom_node,
-                                           size_t dom_parent_gindex, int phase) {
+                                           size_t dom_parent_group_index, int phase) {
   // dom_node->parent and its gnode are guaranteed non-null by RunFuse's caller-side guard.
   IndexedForwardGraph::Node* dom_parent_gnode = dom_node->parent->gnode;
   ICHECK(dom_parent_gnode != nullptr);
 
   // Skip if current node is already fused to the parent.
-  if (groups_[dom_parent_gindex] != nullptr &&
-      group_node->FindRoot() == groups_[dom_parent_gindex]->FindRoot()) {
+  if (groups_[dom_parent_group_index] != nullptr &&
+      group_node->FindRoot() == groups_[dom_parent_group_index]->FindRoot()) {
     return;
   }
   // Do not fuse into tuple for now.
-  if (groups_[dom_parent_gindex]->pattern == kTuple) return;
+  if (groups_[dom_parent_group_index]->pattern == kTuple) return;
 
   auto try_fuse = [&](auto fcond) {
     if (CheckPath(graph_node, dom_parent_gnode, fcond)) {
@@ -436,7 +436,7 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     // no actions needed if the current node have no dominator
     if (dom_node->parent == nullptr) continue;
     ICHECK(!graph_node->extern_ref);
-    size_t dom_parent_gindex = dom_node->parent->gnode->index;
+    size_t dom_parent_group_index = dom_node->parent->gnode->index;
 
     // refuse the fusion if too many ops are going to be fused together
     if (CountFusedNodesWithNewChild(graph_node, dom_node->parent->gnode) > max_fuse_depth_)
@@ -450,11 +450,11 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     }
 
     if (phase == 2) {
-      FuseInjectiveIntoTuple(graph_node, group_node, dom_node, dom_parent_gindex);
+      FuseInjectiveIntoTuple(graph_node, group_node, dom_node, dom_parent_group_index);
       continue;
     }
 
-    FuseToPostDominator(graph_node, group_node, dom_node, dom_parent_gindex, phase);
+    FuseToPostDominator(graph_node, group_node, dom_node, dom_parent_group_index, phase);
   }
 }
 
