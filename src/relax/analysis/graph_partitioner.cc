@@ -208,6 +208,14 @@ void GraphPartitioner::CommitFuse(IndexedForwardGraph::Node* src, IndexedForward
   CommitFuse_(src, sink, target);
 }
 
+template <typename F>
+void GraphPartitioner::TryFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink,
+                               F fcond) {
+  if (CheckPath(src, sink, fcond)) {
+    CommitFuse(src, sink);
+  }
+}
+
 size_t GraphPartitioner::CountNodesUptoSink_(IndexedForwardGraph::Node* src,
                                              IndexedForwardGraph::Node* sink) {
   if (src == sink || visited_.count(src)) return 0;
@@ -351,13 +359,11 @@ void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_n
   // If dom node group has a tuple as its root, we do not fuse tuple fields into it
   if (dom_root_group->pattern == kTuple) return;
   if (dom_parent_group->pattern == kTuple && dom_root_group->pattern <= kInjective) {
-    // Now we know the tuple has been fused into subsequent injective ops
-    auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
-    // dom_root_group can also be tuple, as in inception layers
-    // CheckPath is needed to avoid fusing two intermediate tuples
-    if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-      CommitFuse(graph_node, dom_node->parent->gnode);
-    }
+    // Now we know the tuple has been fused into subsequent injective ops.
+    // dom_root_group can also be tuple, as in inception layers — TryFuse's
+    // CheckPath is needed to avoid fusing two intermediate tuples.
+    TryFuse(graph_node, dom_node->parent->gnode,
+            [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; });
   }
 }
 
@@ -376,19 +382,14 @@ void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node
   // Do not fuse into tuple for now.
   if (groups_[dom_parent_group_index]->pattern == kTuple) return;
 
-  auto try_fuse = [&](auto fcond) {
-    if (CheckPath(graph_node, dom_parent_gnode, fcond)) {
-      CommitFuse(graph_node, dom_parent_gnode);
-    }
-  };
-
   switch (group_node->pattern) {
     case kOutEWiseFusable: {
       // OutEWiseFusable (e.g. conv2d) fuses in phase 0, only when the dominator
       // relation is elemwise and all intermediate ops are still broadcast.
       if (phase != 0) return;
       if (dom_node->pattern != kElemWise) return;
-      try_fuse([](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; });
+      TryFuse(graph_node, dom_parent_gnode,
+              [](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; });
       return;
     }
     case kElemWise:
@@ -397,7 +398,7 @@ void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node
       // Intermediate ops on parallel branches stay <= injective; the sink may
       // already be fused to a kOutEWiseFusable / kCommReduce / kInjective anchor.
       if (dom_node->pattern > kInjective && dom_node->pattern != kCommReduce) return;
-      try_fuse([](OpPatternKind kind, bool is_sink) {
+      TryFuse(graph_node, dom_parent_gnode, [](OpPatternKind kind, bool is_sink) {
         if (!is_sink) return kind <= kInjective;
         return kind <= kBroadcast || kind == kCommReduce || kind == kInjective ||
                kind == kOutEWiseFusable;
@@ -408,7 +409,8 @@ void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node
     case kTuple: {
       // Deferred to phase 1 so conv2d (phase 0) finishes fusing first.
       if (phase != 1) return;
-      try_fuse([](OpPatternKind kind, bool is_sink) { return kind <= kInjective; });
+      TryFuse(graph_node, dom_parent_gnode,
+              [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; });
       return;
     }
     case kCommReduce:
