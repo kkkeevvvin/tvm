@@ -136,10 +136,10 @@ bool GraphPartitioner::CheckPath_(IndexedForwardGraph::Node* src, IndexedForward
                                   F fcond) {
   if (visited_.count(src)) return true;
   visited_.insert(src);
-  Group* group_node = groups_[src->index];
-  ICHECK(group_node != nullptr);
-  group_node = group_node->FindRoot();
-  if (!fcond(group_node->pattern, src == sink)) return false;
+  Group* group = groups_[src->index];
+  ICHECK(group != nullptr);
+  group = group->FindRoot();
+  if (!fcond(group->pattern, src == sink)) return false;
   if (src == sink) return true;
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     if (!CheckPath_(link->value.node, sink, fcond)) return false;
@@ -192,10 +192,10 @@ void GraphPartitioner::CommitFuse_(IndexedForwardGraph::Node* src, IndexedForwar
   if (src == sink) return;
   if (visited_.count(src)) return;
   visited_.insert(src);
-  Group* group_node = groups_[src->index];
-  ICHECK(group_node != nullptr);
+  Group* group = groups_[src->index];
+  ICHECK(group != nullptr);
   // merge the current group to the parent if possible.
-  MergeFromTo(group_node, target);
+  MergeFromTo(group, target);
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     CommitFuse_(link->value.node, sink, target);
   }
@@ -220,9 +220,9 @@ size_t GraphPartitioner::CountNodesUptoSink_(IndexedForwardGraph::Node* src,
                                              IndexedForwardGraph::Node* sink) {
   if (src == sink || visited_.count(src)) return 0;
   visited_.insert(src);
-  Group* group_node = groups_[src->index];
-  ICHECK(group_node != nullptr);
-  auto sum = group_node->num_nodes;
+  Group* group = groups_[src->index];
+  ICHECK(group != nullptr);
+  auto sum = group->num_nodes;
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     sum += CountNodesUptoSink_(link->value.node, sink);
   }
@@ -240,10 +240,10 @@ size_t GraphPartitioner::CountFusedNodesWithNewChild(IndexedForwardGraph::Node* 
 size_t GraphPartitioner::CountArgs_(IndexedForwardGraph::Node* src,
                                     const IndexedForwardGraph& graph, bool update_postpone) {
   std::unordered_set<Group*> visited_groups;
-  Group* group_node = groups_[src->index];
-  ICHECK(group_node != nullptr);
-  auto sum = group_node->args_num;
-  visited_groups.insert(group_node->FindRoot());
+  Group* group = groups_[src->index];
+  ICHECK(group != nullptr);
+  auto sum = group->args_num;
+  visited_groups.insert(group->FindRoot());
   auto calc_args_number = [this, src, &graph, &visited_groups,
                            update_postpone](const Expr& arg) -> size_t {
     if (arg.as<VarNode>()) return 0;
@@ -321,15 +321,15 @@ void GraphPartitioner::InitGroups(const IndexedForwardGraph& graph) {
   groups_.resize(graph.post_dfs_order.size());
   for (size_t nid = 0; nid < groups_.size(); ++nid) {
     const auto* graph_node = graph.post_dfs_order[nid];
-    auto* group_node = arena_->make<Group>();
-    group_node->pattern = graph_node->pattern;
-    group_node->root_ref = graph_node->ref;
+    auto* group = arena_->make<Group>();
+    group->pattern = graph_node->pattern;
+    group->root_ref = graph_node->ref;
     // set anchor ref if necessary.
-    if (group_node->pattern == kOutEWiseFusable) {
-      group_node->anchor_ref = graph_node->ref;
+    if (group->pattern == kOutEWiseFusable) {
+      group->anchor_ref = graph_node->ref;
     }
-    group_node->args_num = args_counter(graph_node->ref);
-    groups_[nid] = group_node;
+    group->args_num = args_counter(graph_node->ref);
+    groups_[nid] = group;
   }
 }
 
@@ -351,9 +351,9 @@ void GraphPartitioner::ProcessPostponedFusing(IndexedForwardGraph::Node* graph_n
 }
 
 void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_node,
-                                              Group* group_node, DominatorTree::Node* dom_node,
+                                              Group* group, DominatorTree::Node* dom_node,
                                               size_t dom_parent_group_index) {
-  if (group_node->pattern > kInjective) return;
+  if (group->pattern > kInjective) return;
   Group* dom_parent_group = groups_[dom_parent_group_index];
   Group* dom_root_group = dom_parent_group->FindRoot();
   // If dom node group has a tuple as its root, we do not fuse tuple fields into it
@@ -368,7 +368,7 @@ void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_n
 }
 
 void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node,
-                                           Group* group_node, DominatorTree::Node* dom_node,
+                                           Group* group, DominatorTree::Node* dom_node,
                                            size_t dom_parent_group_index, int phase) {
   // dom_node->parent and its gnode are guaranteed non-null by RunFuse's caller-side guard.
   IndexedForwardGraph::Node* dom_parent_gnode = dom_node->parent->gnode;
@@ -376,13 +376,13 @@ void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node
 
   // Skip if current node is already fused to the parent.
   if (groups_[dom_parent_group_index] != nullptr &&
-      group_node->FindRoot() == groups_[dom_parent_group_index]->FindRoot()) {
+      group->FindRoot() == groups_[dom_parent_group_index]->FindRoot()) {
     return;
   }
   // Do not fuse into tuple for now.
   if (groups_[dom_parent_group_index]->pattern == kTuple) return;
 
-  switch (group_node->pattern) {
+  switch (group->pattern) {
     case kOutEWiseFusable: {
       // OutEWiseFusable (e.g. conv2d) fuses in phase 0, only when the dominator
       // relation is elemwise and all intermediate ops are still broadcast.
@@ -417,7 +417,7 @@ void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node
     case kCommReduce:
       return;
     default:
-      LOG(FATAL) << "FuseToPostDominator: unexpected pattern " << group_node->pattern;
+      LOG(FATAL) << "FuseToPostDominator: unexpected pattern " << group->pattern;
   }
 }
 
@@ -428,14 +428,14 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     // the group of current node has been specified already.
     auto* graph_node = graph.post_dfs_order[nid];
     auto* dom_node = post_dom_tree.nodes[nid];
-    Group* group_node = groups_[nid];
-    ICHECK(group_node != nullptr);
+    Group* group = groups_[nid];
+    ICHECK(group != nullptr);
     postpone_node_ = nullptr;
 
     ProcessPostponedFusing(graph_node, graph, post_dom_tree);
 
     // no actions for opaque nodes
-    if (group_node->pattern == kOpaque) continue;
+    if (group->pattern == kOpaque) continue;
     // no actions needed if the current node have no dominator
     if (dom_node->parent == nullptr) continue;
     ICHECK(!graph_node->extern_ref);
@@ -453,11 +453,11 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     }
 
     if (phase == 2) {
-      FuseInjectiveIntoTuple(graph_node, group_node, dom_node, dom_parent_group_index);
+      FuseInjectiveIntoTuple(graph_node, group, dom_node, dom_parent_group_index);
       continue;
     }
 
-    FuseToPostDominator(graph_node, group_node, dom_node, dom_parent_group_index, phase);
+    FuseToPostDominator(graph_node, group, dom_node, dom_parent_group_index, phase);
   }
 }
 
