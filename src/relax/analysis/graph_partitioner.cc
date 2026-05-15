@@ -501,6 +501,20 @@ void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
     LOG(INFO) << "\nkElemWise op with min output_size:"
               << " node[" << min_node->index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
               << " bytes=" << min_node->output_size;
+    // dnnf: for successor in successors ( sp ) :
+    {
+      std::ostringstream succ_os;
+      size_t succ_count = 0;
+      for (auto* link = min_node->outputs.head; link != nullptr; link = link->next) {
+        IndexedForwardGraph::Node* succ = link->value.node;
+        succ_os << " node[" << succ->index << "] " << ffi::GetRef<ObjectRef>(succ->ref)
+                << " (pattern=" << succ->pattern << ", bytes=" << succ->output_size << ")\n";
+        ++succ_count;
+      }
+      LOG(INFO) << "  successors of node[" << min_node->index << "]: " << succ_count << "\n"
+                << succ_os.str();
+    }
+
     // dnnf: unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
