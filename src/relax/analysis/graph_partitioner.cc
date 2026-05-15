@@ -28,12 +28,11 @@ namespace relax {
 
 namespace {
 // Return the kElemWise node in `unfused_ops` with the smallest known
-// output_size, along with its post-DFS index (node->index). Nodes with
-// output_size < 0 (dynamic / opaque sinfo) are skipped. Ties break on the
-// smaller post-DFS index so the result is deterministic despite the
-// unordered_set's unspecified iteration order. Returns {nullptr, 0} when no
-// candidate exists.
-std::pair<IndexedForwardGraph::Node*, size_t> FindMinElemWise(
+// output_size. Nodes with output_size < 0 (dynamic / opaque sinfo) are
+// skipped. Ties break on the smaller post-DFS index (node->index) so the
+// result is deterministic despite the unordered_set's unspecified iteration
+// order. Returns nullptr when no candidate exists.
+IndexedForwardGraph::Node* FindMinElemWise(
     const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
   for (IndexedForwardGraph::Node* node : unfused_ops) {
@@ -44,7 +43,7 @@ std::pair<IndexedForwardGraph::Node*, size_t> FindMinElemWise(
       min_node = node;
     }
   }
-  return {min_node, min_node ? min_node->index : 0};
+  return min_node;
 }
 }  // namespace
 
@@ -495,12 +494,12 @@ void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
 
   while (true) {
     // dnnf: generate seed
-    auto [min_node, min_index] = FindMinElemWise(unfused_ops);
+    IndexedForwardGraph::Node* min_node = FindMinElemWise(unfused_ops);
     if (min_node == nullptr) break;
     // dnnf: block = [min_node]
     std::unordered_set<IndexedForwardGraph::Node*> block{min_node};
     LOG(INFO) << "\nkElemWise op with min output_size:"
-              << " node[" << min_index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
+              << " node[" << min_node->index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
               << " bytes=" << min_node->output_size;
     // dnnf: unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
