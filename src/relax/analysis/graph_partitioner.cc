@@ -565,13 +565,10 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
 
 void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
-
-  // <DNNF Algorithm Entry>
   // unfused_ops = all_operaters
   std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
       graph.post_dfs_order.begin(), graph.post_dfs_order.end());
   LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
-  
   IndexedForwardGraph::Node* seed = nullptr;
   // generate seed
   while (seed = FindMinElemWise(unfused_ops)) {
@@ -588,7 +585,7 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     for (auto* link = seed->inputs.head; link != nullptr; link = link->next) {
       FusePredecessor(seed, link->value.node, &block);
     }
-    // dnnf: unfused_ops = unfused_ops - block
+    // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
 }
