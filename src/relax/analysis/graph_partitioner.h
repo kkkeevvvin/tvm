@@ -338,6 +338,8 @@ class GraphPartitioner {
 
   // test
   void RunMyFuse(const IndexedForwardGraph& graph);
+  void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
+                     std::unordered_set<IndexedForwardGraph::Node*>* block);
 };
 
 }  // namespace relax

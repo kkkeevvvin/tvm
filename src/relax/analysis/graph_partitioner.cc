@@ -27,11 +27,6 @@ namespace tvm {
 namespace relax {
 
 namespace {
-// Return the kElemWise node in `unfused_ops` with the smallest known
-// output_size. Nodes with output_size < 0 (dynamic / opaque sinfo) are
-// skipped. Ties break on the smaller post-DFS index (node->index) so the
-// result is deterministic despite the unordered_set's unspecified iteration
-// order. Returns nullptr when no candidate exists.
 IndexedForwardGraph::Node* FindMinElemWise(
     const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
@@ -484,6 +479,45 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
   }
 }
 
+void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
+                                     IndexedForwardGraph::Node* successor,
+                                     std::unordered_set<IndexedForwardGraph::Node*>* block) {
+  LOG(INFO) << "  successor of node[" << sp->index << "]:"
+            << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
+            << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
+  // dnnf: Step 2.1: check the mapping relationship
+  // dnnf:     relation = mapping_check ( op , successor )
+  // TVM analog: CombinePattern's hard guard — two patterns stricter than
+  // kBroadcast cannot be merged into one group.
+  bool relation = !(sp->pattern > kBroadcast && successor->pattern > kBroadcast);
+  LOG(INFO) << "    relation = " << (relation ? "true" : "false");
+  // dnnf: # return if successor can not be fused
+  // dnnf:      if relation == fuse_break : return
+  if (!relation) return;
+  // dnnf: # Step 2.2: check the constraint requirement
+  // dnnf:     if not check_constraint ( op , successor , block ) : return
+  // TVM analog: CheckPath walks sp -> successor and verifies every
+  // intermediate group's pattern satisfies fcond. We take the union of every
+  // phase's fcond in FuseToPostDominator/FuseInjectiveIntoTuple — intermediate
+  // path stays <= kInjective (most permissive non-sink rule any phase uses),
+  // sink accepts anything <= kOutEWiseFusable (the kElemWise/kBroadcast sink
+  // rule, which is the loosest). kTuple/kOpaque sinks still rejected.
+  auto fcond = [](OpPatternKind kind, bool is_sink) {
+    if (is_sink) return kind <= kOutEWiseFusable;
+    return kind <= kInjective;
+  };
+  if (!CheckPath(sp, successor, fcond)) {
+    LOG(INFO) << "    CheckPath: false (path-safety rejected)";
+    return;
+  }
+  LOG(INFO) << "    CheckPath: true -> CommitFuse";
+  // dnnf: block = op + successor
+  // TVM analog: CommitFuse merges every group on sp -> successor into the
+  // successor's group via union-find; groups_ now reflects the decision.
+  CommitFuse(sp, successor);
+  block->insert(successor);
+}
+
 void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
 
@@ -501,6 +535,12 @@ void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
     LOG(INFO) << "\nkElemWise op with min output_size:"
               << " node[" << min_node->index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
               << " bytes=" << min_node->output_size;
+    // dnnf: for successor in successors ( sp ) :
+    for (auto* link = min_node->outputs.head; link != nullptr; link = link->next) {
+      // dnnf: fuse_successor ( sp , successor , block )
+      FuseSuccessor(min_node, link->value.node, &block);
+    }
+
     // dnnf: unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
