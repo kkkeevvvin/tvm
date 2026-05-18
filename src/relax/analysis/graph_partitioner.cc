@@ -533,6 +533,10 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   if (!CheckPath(sp, successor, fcond)) return;
   CommitFuse(sp, successor);
   block->insert(successor);
+  // Recurse into the fused successor to extend the chain past one hop.
+  for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
+    FuseSuccessor(successor, link->value.node, block);
+  }
 }
 
 void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
