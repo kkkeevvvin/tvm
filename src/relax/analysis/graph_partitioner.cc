@@ -485,44 +485,22 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   LOG(INFO) << "  successor of node[" << sp->index << "]:"
             << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
             << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
-  // dnnf: Step 2.1: check the mapping relationship
-  // dnnf:     relation = mapping_check ( op , successor )
-  // TVM analog: CombinePattern's hard guard — two patterns stricter than
-  // kBroadcast cannot be merged into one group. We read the GROUP root
-  // pattern (not the node pattern) so a seed whose group has already
-  // absorbed a complex op via the other-direction walk is recognized.
+  // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
-  bool relation = !(sp_pat > kBroadcast && succ_pat > kBroadcast);
-  LOG(INFO) << "    relation = " << (relation ? "true" : "false");
-  // dnnf: # return if successor can not be fused
-  // dnnf:      if relation == fuse_break : return
-  if (!relation) return;
-  // dnnf: # Step 2.2: check the constraint requirement
-  // dnnf:     if not check_constraint ( op , successor , block ) : return
-  // TVM analog: CheckPath walks sp -> successor and verifies every
-  // intermediate group's pattern satisfies fcond. We take the union of every
-  // phase's fcond in FuseToPostDominator/FuseInjectiveIntoTuple — intermediate
-  // path stays <= kInjective (most permissive non-sink rule any phase uses),
-  // sink accepts anything <= kOutEWiseFusable (the kElemWise/kBroadcast sink
-  // rule, which is the loosest). kTuple/kOpaque sinks still rejected.
+  bool bad_relation = sp_pat > kBroadcast && succ_pat > kBroadcast;
+  LOG(INFO) << "    bad_relation = " << (bad_relation ? "true" : "false");
+  // return if successor can not be fused
+  if (bad_relation) return;
+  // check the constraint requirement
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
     return kind <= kInjective;
   };
-  if (!CheckPath(sp, successor, fcond)) {
-    LOG(INFO) << "    CheckPath: false (path-safety rejected)";
-    return;
-  }
-  // dnnf: block = op + successor
-  // TVM analog: CommitFuse merges every group on sp -> successor into the
-  // successor's group via union-find; groups_ now reflects the decision.
-  LOG(INFO) << "    CheckPath: true - CommitFuse";
+  if (!CheckPath(sp, successor, fcond)) return;
   CommitFuse(sp, successor);
   block->insert(successor);
-  // dnnf: for fusing_op in successors ( successor ) :
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
-    // dnnf: fuse_successor ( successor , fusing_op , block )
     FuseSuccessor(successor, link->value.node, block);
   }
 }
@@ -540,9 +518,9 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   // op via the successor walk is recognized.
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
-  bool relation = !(sp_pat > kBroadcast && pred_pat > kBroadcast);
-  LOG(INFO) << "    relation = " << (relation ? "true" : "false");
-  if (!relation) return;
+  bool bad_relation = sp_pat > kBroadcast && pred_pat > kBroadcast;
+  LOG(INFO) << "    bad_relation = " << (bad_relation ? "true" : "false");
+  if (bad_relation) return;
   // dnnf: Step 2.2 path safety. CheckPath walks src -> sink via outputs, so
   // the forward path predecessor -> sp uses argument order (predecessor, sp).
   auto fcond = [](OpPatternKind kind, bool is_sink) {
