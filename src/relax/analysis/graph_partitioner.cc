@@ -121,7 +121,7 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
   this->InitGroups(graph);
   if (opt_level_ == 0) return std::move(groups_);
   if (opt_level_ == 6) {
-    this->RunMyFuse(graph);
+    this->RunDNNFuse(graph);
     return std::move(groups_);
   }
   // get post dominator tree
@@ -563,35 +563,29 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   }
 }
 
-void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
+void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
-
-  // dnnf: unfused_ops = all_operaters
+  // unfused_ops = all_operaters
   std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
       graph.post_dfs_order.begin(), graph.post_dfs_order.end());
   LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
-
-  while (true) {
-    // dnnf: generate seed
-    IndexedForwardGraph::Node* min_node = FindMinElemWise(unfused_ops);
-    if (min_node == nullptr) break;
-    // dnnf: block = [min_node]
-    std::unordered_set<IndexedForwardGraph::Node*> block{min_node};
+  IndexedForwardGraph::Node* seed = nullptr;
+  // generate seed
+  while (seed = FindMinElemWise(unfused_ops)) {
+    // block = [ seed ]
+    std::unordered_set<IndexedForwardGraph::Node*> block{seed};
     LOG(INFO) << "\nkElemWise op with min output_size:"
-              << " node[" << min_node->index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
-              << " bytes=" << min_node->output_size;
-    // dnnf: for successor in successors ( sp ) :
-    for (auto* link = min_node->outputs.head; link != nullptr; link = link->next) {
-      // dnnf: fuse_successor ( sp , successor , block )
-      FuseSuccessor(min_node, link->value.node, &block);
+              << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
+              << " bytes=" << seed->output_size;
+    // head to successor
+    for (auto* link = seed->outputs.head; link != nullptr; link = link->next) {
+      FuseSuccessor(seed, link->value.node, &block);
     }
-    // dnnf: for predecessor in predecessors ( sp ) :
-    for (auto* link = min_node->inputs.head; link != nullptr; link = link->next) {
-      // dnnf: fuse_predecessor ( sp , predecessor , block )
-      FusePredecessor(min_node, link->value.node, &block);
+    // head to predecessor
+    for (auto* link = seed->inputs.head; link != nullptr; link = link->next) {
+      FusePredecessor(seed, link->value.node, &block);
     }
-
-    // dnnf: unfused_ops = unfused_ops - block
+    // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
 }

@@ -339,7 +339,7 @@ class GraphPartitioner {
                            int phase);
 
   // test
-  void RunMyFuse(const IndexedForwardGraph& graph);
+  void RunDNNFuse(const IndexedForwardGraph& graph);
   void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
                      std::unordered_set<IndexedForwardGraph::Node*>* block);
   void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
