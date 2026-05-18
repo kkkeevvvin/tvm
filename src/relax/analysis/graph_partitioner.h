@@ -74,6 +74,8 @@ class IndexedForwardGraph {
     int64_t output_size{-1};
     /*! \brief The outputs of the node. */
     LinkedList<Edge> outputs;
+    /*! \brief The inputs of the node.  */
+    LinkedList<Edge> inputs;
   };
   /*! \brief The node map that maps node to graph */
   std::unordered_map<const tvm::Object*, Node*> node_map;
