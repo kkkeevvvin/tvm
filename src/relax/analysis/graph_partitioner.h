@@ -285,6 +285,10 @@ class GraphPartitioner {
    */
   void CommitFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
 
+  // If every path from src to sink satisfies fcond, commit the fusion.
+  template <typename F>
+  void TryFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink, F fcond);
+
   size_t CountNodesUptoSink_(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
   // Calculate the number of arguments for the node.
   size_t CountArgs_(IndexedForwardGraph::Node* src, const IndexedForwardGraph& graph,
