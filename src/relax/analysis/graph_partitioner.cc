@@ -19,10 +19,39 @@
 
 #include "./graph_partitioner.h"
 
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace tvm {
 namespace relax {
+
+namespace {
+/*!
+ * \brief Find the element-wise node with the smallest output among unfused ops.
+ *
+ * Considers only nodes whose pattern is kElemWise and whose output_size is
+ * known (non-negative), and returns the one with the smallest output_size.
+ * Ties are broken by the smaller node index to keep the selection deterministic.
+ *
+ * \param unfused_ops The set of candidate nodes that have not been fused yet.
+ * \return The matching node with the minimum output size, or nullptr if no
+ *         eligible element-wise node exists.
+ */
+IndexedForwardGraph::Node* FindMinElemWise(
+    const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
+  IndexedForwardGraph::Node* min_node = nullptr;
+  for (IndexedForwardGraph::Node* node : unfused_ops) {
+    if (node->pattern != kElemWise) continue;
+    if (node->output_size < 0) continue;
+    if (min_node == nullptr || node->output_size < min_node->output_size ||
+        (node->output_size == min_node->output_size && node->index < min_node->index)) {
+      min_node = node;
+    }
+  }
+  return min_node;
+}
+}  // namespace
 
 DominatorTree DominatorTree::PostDom(support::Arena* arena, const IndexedForwardGraph& graph) {
   DominatorTree tree;
@@ -446,6 +475,21 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
 
 void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
+  // unfused_ops = all_operaters
+  std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
+      graph.post_dfs_order.begin(), graph.post_dfs_order.end());
+  LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
+  IndexedForwardGraph::Node* seed = nullptr;
+  // generate seed
+  while ((seed = FindMinElemWise(unfused_ops)) != nullptr) {
+    // block = [ seed ]
+    std::unordered_set<IndexedForwardGraph::Node*> block{seed};
+    LOG(INFO) << "\nkElemWise op with min output_size:"
+              << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
+              << " bytes=" << seed->output_size;
+    // unfused_ops = unfused_ops - block
+    for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
+  }
 }
 
 }  // namespace relax
