@@ -375,10 +375,15 @@ class GraphCreator : public ExprVisitor {
    */
   void AddEdge(IndexedForwardGraph::Node* start, IndexedForwardGraph::Node* end,
                OpPatternKind pattern) {
-    auto* link = arena_->make<LinkNode<IndexedForwardGraph::Edge>>();
-    link->value.node = end;
-    link->value.pattern = pattern;
-    start->outputs.Push(link);
+    auto* fwd = arena_->make<LinkNode<IndexedForwardGraph::Edge>>();
+    fwd->value.node = end;
+    fwd->value.pattern = pattern;
+    start->outputs.Push(fwd);
+
+    auto* rev = arena_->make<LinkNode<IndexedForwardGraph::Edge>>();
+    rev->value.node = start;
+    rev->value.pattern = pattern;
+    end->inputs.Push(rev);
   }
 
   /*!
