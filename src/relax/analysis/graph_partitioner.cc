@@ -19,10 +19,33 @@
 
 #include "./graph_partitioner.h"
 
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace tvm {
 namespace relax {
+
+namespace {
+// Return the kElemWise node in `unfused_ops` with the smallest known
+// output_size. Nodes with output_size < 0 (dynamic / opaque sinfo) are
+// skipped. Ties break on the smaller post-DFS index (node->index) so the
+// result is deterministic despite the unordered_set's unspecified iteration
+// order. Returns nullptr when no candidate exists.
+IndexedForwardGraph::Node* FindMinElemWise(
+    const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
+  IndexedForwardGraph::Node* min_node = nullptr;
+  for (IndexedForwardGraph::Node* node : unfused_ops) {
+    if (node->pattern != kElemWise) continue;
+    if (node->output_size < 0) continue;
+    if (min_node == nullptr || node->output_size < min_node->output_size ||
+        (node->output_size == min_node->output_size && node->index < min_node->index)) {
+      min_node = node;
+    }
+  }
+  return min_node;
+}
+}  // namespace
 
 DominatorTree DominatorTree::PostDom(support::Arena* arena, const IndexedForwardGraph& graph) {
   DominatorTree tree;
@@ -463,6 +486,24 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
 
 void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
+
+  // dnnf: unfused_ops = all_operaters
+  std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
+      graph.post_dfs_order.begin(), graph.post_dfs_order.end());
+  LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
+
+  while (true) {
+    // dnnf: generate seed
+    IndexedForwardGraph::Node* min_node = FindMinElemWise(unfused_ops);
+    if (min_node == nullptr) break;
+    // dnnf: block = [min_node]
+    std::unordered_set<IndexedForwardGraph::Node*> block{min_node};
+    LOG(INFO) << "\nkElemWise op with min output_size:"
+              << " node[" << min_node->index << "], " << ffi::GetRef<ObjectRef>(min_node->ref)
+              << " bytes=" << min_node->output_size;
+    // dnnf: unfused_ops = unfused_ops - block
+    for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
+  }
 }
 
 }  // namespace relax
