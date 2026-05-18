@@ -121,7 +121,7 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
   this->InitGroups(graph);
   if (opt_level_ == 0) return std::move(groups_);
   if (opt_level_ == 6) {
-    this->RunMyFuse(graph);
+    this->RunDNNFuse(graph);
     return std::move(groups_);
   }
   // get post dominator tree
@@ -563,7 +563,7 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   }
 }
 
-void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
+void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
 
   // <DNNF Algorithm Entry>
