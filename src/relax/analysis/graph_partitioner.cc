@@ -510,6 +510,31 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
   }
 }
 
+void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
+                                     IndexedForwardGraph::Node* successor,
+                                     std::unordered_set<IndexedForwardGraph::Node*>* block) {
+  LOG(INFO) << "  successor of node[" << sp->index << "]:"
+            << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
+            << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
+  // check the mapping relationship
+  OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
+  OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
+  DNNFuseRelation relation = DNNFuseRelation::Classify(sp_pat, succ_pat);
+  LOG(INFO) << "    relation = " << relation.Name();
+  // return if successor can not be fused
+  if (relation.IsBreak()) return;
+  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
+  if (relation.IsDepend()) return;
+  // check the constraint requirement
+  auto fcond = [](OpPatternKind kind, bool is_sink) {
+    if (is_sink) return kind <= kOutEWiseFusable;
+    return kind <= kInjective;
+  };
+  if (!CheckPath(sp, successor, fcond)) return;
+  CommitFuse(sp, successor);
+  block->insert(successor);
+}
+
 void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
   // unfused_ops = all_operaters
@@ -524,6 +549,11 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     LOG(INFO) << "\nkElemWise op with min output_size:"
               << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
               << " bytes=" << seed->output_size;
+    // head to successor
+    for (auto* link = seed->outputs.head; link != nullptr; link = link->next) {
+      FuseSuccessor(seed, link->value.node, &block);
+    }
+
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
