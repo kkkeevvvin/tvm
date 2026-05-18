@@ -513,30 +513,22 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
             << ffi::GetRef<ObjectRef>(predecessor->ref)
             << " (pattern=" << predecessor->pattern
             << ", bytes=" << predecessor->output_size << ")";
-  // dnnf: Step 2.1 mapping check (same rule as forward direction). Read the
-  // GROUP root pattern so a seed whose group has already absorbed a complex
-  // op via the successor walk is recognized.
+  // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
   bool bad_relation = sp_pat > kBroadcast && pred_pat > kBroadcast;
   LOG(INFO) << "    bad_relation = " << (bad_relation ? "true" : "false");
+  // return if predecessor can not be fused
   if (bad_relation) return;
-  // dnnf: Step 2.2 path safety. CheckPath walks src -> sink via outputs, so
-  // the forward path predecessor -> sp uses argument order (predecessor, sp).
+  // check the constraint requirement
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
     return kind <= kInjective;
   };
-  if (!CheckPath(predecessor, sp, fcond)) {
-    LOG(INFO) << "    CheckPath: false (path-safety rejected)";
-    return;
-  }
-  LOG(INFO) << "    CheckPath: true - CommitFuse";
+  if (!CheckPath(predecessor, sp, fcond)) return;
   CommitFuse(predecessor, sp);
   block->insert(predecessor);
-  // dnnf: for fusing_op in predecessors ( predecessor ) :
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
-    // dnnf: fuse_predecessor ( predecessor , fusing_op , block )
     FusePredecessor(predecessor, link->value.node, block);
   }
 }
