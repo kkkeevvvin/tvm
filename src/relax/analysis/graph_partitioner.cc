@@ -488,8 +488,12 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // dnnf: Step 2.1: check the mapping relationship
   // dnnf:     relation = mapping_check ( op , successor )
   // TVM analog: CombinePattern's hard guard — two patterns stricter than
-  // kBroadcast cannot be merged into one group.
-  bool relation = !(sp->pattern > kBroadcast && successor->pattern > kBroadcast);
+  // kBroadcast cannot be merged into one group. We read the GROUP root
+  // pattern (not the node pattern) so a seed whose group has already
+  // absorbed a complex op via the other-direction walk is recognized.
+  OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
+  OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
+  bool relation = !(sp_pat > kBroadcast && succ_pat > kBroadcast);
   LOG(INFO) << "    relation = " << (relation ? "true" : "false");
   // dnnf: # return if successor can not be fused
   // dnnf:      if relation == fuse_break : return
@@ -510,17 +514,52 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
     LOG(INFO) << "    CheckPath: false (path-safety rejected)";
     return;
   }
-  LOG(INFO) << "    CheckPath: true -> CommitFuse";
   // dnnf: block = op + successor
   // TVM analog: CommitFuse merges every group on sp -> successor into the
   // successor's group via union-find; groups_ now reflects the decision.
+  LOG(INFO) << "    CheckPath: true - CommitFuse";
   CommitFuse(sp, successor);
   block->insert(successor);
-  // dnnf: # Step 2.4: recursively head to successor
   // dnnf: for fusing_op in successors ( successor ) :
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
     // dnnf: fuse_successor ( successor , fusing_op , block )
     FuseSuccessor(successor, link->value.node, block);
+  }
+}
+
+void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
+                                       IndexedForwardGraph::Node* predecessor,
+                                       std::unordered_set<IndexedForwardGraph::Node*>* block) {
+  LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
+            << " node[" << predecessor->index << "] "
+            << ffi::GetRef<ObjectRef>(predecessor->ref)
+            << " (pattern=" << predecessor->pattern
+            << ", bytes=" << predecessor->output_size << ")";
+  // dnnf: Step 2.1 mapping check (same rule as forward direction). Read the
+  // GROUP root pattern so a seed whose group has already absorbed a complex
+  // op via the successor walk is recognized.
+  OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
+  OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
+  bool relation = !(sp_pat > kBroadcast && pred_pat > kBroadcast);
+  LOG(INFO) << "    relation = " << (relation ? "true" : "false");
+  if (!relation) return;
+  // dnnf: Step 2.2 path safety. CheckPath walks src -> sink via outputs, so
+  // the forward path predecessor -> sp uses argument order (predecessor, sp).
+  auto fcond = [](OpPatternKind kind, bool is_sink) {
+    if (is_sink) return kind <= kOutEWiseFusable;
+    return kind <= kInjective;
+  };
+  if (!CheckPath(predecessor, sp, fcond)) {
+    LOG(INFO) << "    CheckPath: false (path-safety rejected)";
+    return;
+  }
+  LOG(INFO) << "    CheckPath: true - CommitFuse";
+  CommitFuse(predecessor, sp);
+  block->insert(predecessor);
+  // dnnf: for fusing_op in predecessors ( predecessor ) :
+  for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
+    // dnnf: fuse_predecessor ( predecessor , fusing_op , block )
+    FusePredecessor(predecessor, link->value.node, block);
   }
 }
 
@@ -545,6 +584,11 @@ void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
     for (auto* link = min_node->outputs.head; link != nullptr; link = link->next) {
       // dnnf: fuse_successor ( sp , successor , block )
       FuseSuccessor(min_node, link->value.node, &block);
+    }
+    // dnnf: for predecessor in predecessors ( sp ) :
+    for (auto* link = min_node->inputs.head; link != nullptr; link = link->next) {
+      // dnnf: fuse_predecessor ( sp , predecessor , block )
+      FusePredecessor(min_node, link->value.node, &block);
     }
 
     // dnnf: unfused_ops = unfused_ops - block

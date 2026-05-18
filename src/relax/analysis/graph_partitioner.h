@@ -74,7 +74,7 @@ class IndexedForwardGraph {
     int64_t output_size{-1};
     /*! \brief The outputs of the node. */
     LinkedList<Edge> outputs;
-    /*! \brief The inputs of the node.  */
+    /*! \brief The inputs of the node. */
     LinkedList<Edge> inputs;
   };
   /*! \brief The node map that maps node to graph */
@@ -342,6 +342,8 @@ class GraphPartitioner {
   void RunMyFuse(const IndexedForwardGraph& graph);
   void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
                      std::unordered_set<IndexedForwardGraph::Node*>* block);
+  void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
+                       std::unordered_set<IndexedForwardGraph::Node*>* block);
 };
 
 }  // namespace relax
