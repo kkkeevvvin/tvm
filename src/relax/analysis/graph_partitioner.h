@@ -352,6 +352,28 @@ class GraphPartitioner {
    */
   void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
                      std::unordered_set<IndexedForwardGraph::Node*>* block);
+  /*!
+   * \brief Recursively fuse backward (predecessor) neighbours into sp's group.
+   *
+   * The backward mirror of FuseSuccessor. 
+   *
+   * Implements RunDNNFuse's backward expansion (DNNFusion Listing 1 Step 2.1-2.3),
+   * walking Node::inputs instead of Node::outputs, along the data path 
+   * predecessor -> sp.
+   * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
+   * the two groups' root patternsx:
+   *   - kFuseBreak: reject the fusion outright.
+   *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
+   *   - kFuseThrough: fuse.
+   * On success, CommitFuse(predecessor, sp) unions the groups along the walk, the
+   * predecessor is added to block, and expansion recurses into its predecessors.
+   *
+   * \param sp The seed node whose group is being extended.
+   * \param predecessor The backward neighbour considered for fusion.
+   * \param block The accumulating set of nodes fused into the seed's block.
+   */
+  void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
+                       std::unordered_set<IndexedForwardGraph::Node*>* block);
 };
 
 }  // namespace relax

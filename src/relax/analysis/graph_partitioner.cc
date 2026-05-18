@@ -539,6 +539,35 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   }
 }
 
+void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
+                                       IndexedForwardGraph::Node* predecessor,
+                                       std::unordered_set<IndexedForwardGraph::Node*>* block) {
+  LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
+            << " node[" << predecessor->index << "] " << ffi::GetRef<ObjectRef>(predecessor->ref)
+            << " (pattern=" << predecessor->pattern << ", bytes=" << predecessor->output_size << ")";
+  // check the mapping relationship
+  OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
+  OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
+  DNNFuseRelation relation = DNNFuseRelation::Classify(pred_pat, sp_pat);
+  LOG(INFO) << "    relation = " << relation.Name();
+  // return if predecessor can not be fused
+  if (relation.IsBreak()) return;
+  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
+  if (relation.IsDepend()) return;
+  // check the constraint requirement
+  auto fcond = [](OpPatternKind kind, bool is_sink) {
+    if (is_sink) return kind <= kOutEWiseFusable;
+    return kind <= kInjective;
+  };
+  if (!CheckPath(predecessor, sp, fcond)) return;
+  CommitFuse(predecessor, sp);
+  block->insert(predecessor);
+  // Recurse into the fused predecessor to extend the chain past one hop.
+  for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
+    FusePredecessor(predecessor, link->value.node, block);
+  }
+}
+
 void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
   // unfused_ops = all_operaters
@@ -557,7 +586,10 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     for (auto* link = seed->outputs.head; link != nullptr; link = link->next) {
       FuseSuccessor(seed, link->value.node, &block);
     }
-
+    // head to predecessor
+    for (auto* link = seed->inputs.head; link != nullptr; link = link->next) {
+      FusePredecessor(seed, link->value.node, &block);
+    }
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
