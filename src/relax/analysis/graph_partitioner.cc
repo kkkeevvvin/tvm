@@ -516,6 +516,12 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // successor's group via union-find; groups_ now reflects the decision.
   CommitFuse(sp, successor);
   block->insert(successor);
+  // dnnf: # Step 2.4: recursively head to successor
+  // dnnf: for fusing_op in successors ( successor ) :
+  for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
+    // dnnf: fuse_successor ( successor , fusing_op , block )
+    FuseSuccessor(successor, link->value.node, block);
+  }
 }
 
 void GraphPartitioner::RunMyFuse(const IndexedForwardGraph& graph) {
