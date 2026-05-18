@@ -325,6 +325,99 @@ void GraphPartitioner::InitGroups(const IndexedForwardGraph& graph) {
   }
 }
 
+void GraphPartitioner::ProcessPostponedFusing(IndexedForwardGraph::Node* graph_node,
+                                              const IndexedForwardGraph& graph,
+                                              const DominatorTree& post_dom_tree) {
+  if (!postponed_fusing_map_.count(graph_node)) return;
+  auto range = postponed_fusing_map_.equal_range(graph_node);
+  for (auto it = range.first; it != range.second; ++it) {
+    // If the number of arguments is less than the limit then the input can be fused
+    if (CountArgs_(graph_node, graph, false) <= CountArgsLimit_(graph_node)) {
+      auto* src = it->second;
+      auto* snode = post_dom_tree.nodes[src->index]->parent->gnode;
+      if (groups_[snode->index]->anchor_ref != nullptr) continue;
+      CommitFuse(src, snode);
+    }
+  }
+  postponed_fusing_map_.erase(graph_node);
+}
+
+void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_node,
+                                              Group* group_node, DominatorTree::Node* dom_node,
+                                              size_t dom_parent_gindex) {
+  if (group_node->pattern > kInjective) return;
+  Group* dom_parent_group = groups_[dom_parent_gindex];
+  Group* dom_root_group = dom_parent_group->FindRoot();
+  // If dom node group has a tuple as its root, we do not fuse tuple fields into it
+  if (dom_root_group->pattern == kTuple) return;
+  if (dom_parent_group->pattern == kTuple && dom_root_group->pattern <= kInjective) {
+    // Now we know the tuple has been fused into subsequent injective ops
+    auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
+    // dom_root_group can also be tuple, as in inception layers
+    // CheckPath is needed to avoid fusing two intermediate tuples
+    if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
+      CommitFuse(graph_node, dom_node->parent->gnode);
+    }
+  }
+}
+
+void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node,
+                                           Group* group_node, DominatorTree::Node* dom_node,
+                                           size_t dom_parent_gindex, int phase) {
+  // dom_node->parent and its gnode are guaranteed non-null by RunFuse's caller-side guard.
+  IndexedForwardGraph::Node* dom_parent_gnode = dom_node->parent->gnode;
+  ICHECK(dom_parent_gnode != nullptr);
+
+  // Skip if current node is already fused to the parent.
+  if (groups_[dom_parent_gindex] != nullptr &&
+      group_node->FindRoot() == groups_[dom_parent_gindex]->FindRoot()) {
+    return;
+  }
+  // Do not fuse into tuple for now.
+  if (groups_[dom_parent_gindex]->pattern == kTuple) return;
+
+  auto try_fuse = [&](auto fcond) {
+    if (CheckPath(graph_node, dom_parent_gnode, fcond)) {
+      CommitFuse(graph_node, dom_parent_gnode);
+    }
+  };
+
+  switch (group_node->pattern) {
+    case kOutEWiseFusable: {
+      // OutEWiseFusable (e.g. conv2d) fuses in phase 0, only when the dominator
+      // relation is elemwise and all intermediate ops are still broadcast.
+      if (phase != 0) return;
+      if (dom_node->pattern != kElemWise) return;
+      try_fuse([](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; });
+      return;
+    }
+    case kElemWise:
+    case kBroadcast: {
+      // Elemwise/broadcast can fuse to an injective or reduction parent.
+      // Intermediate ops on parallel branches stay <= injective; the sink may
+      // already be fused to a kOutEWiseFusable / kCommReduce / kInjective anchor.
+      if (dom_node->pattern > kInjective && dom_node->pattern != kCommReduce) return;
+      try_fuse([](OpPatternKind kind, bool is_sink) {
+        if (!is_sink) return kind <= kInjective;
+        return kind <= kBroadcast || kind == kCommReduce || kind == kInjective ||
+               kind == kOutEWiseFusable;
+      });
+      return;
+    }
+    case kInjective:
+    case kTuple: {
+      // Deferred to phase 1 so conv2d (phase 0) finishes fusing first.
+      if (phase != 1) return;
+      try_fuse([](OpPatternKind kind, bool is_sink) { return kind <= kInjective; });
+      return;
+    }
+    case kCommReduce:
+      return;
+    default:
+      LOG(FATAL) << "FuseToPostDominator: unexpected pattern " << group_node->pattern;
+  }
+}
+
 void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
                                const DominatorTree& post_dom_tree,  //
                                int phase) {
@@ -335,20 +428,9 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     Group* group_node = groups_[nid];
     ICHECK(group_node != nullptr);
     postpone_node_ = nullptr;
-    // Check if the fusing of some inputs was postponed
-    if (postponed_fusing_map_.count(graph_node)) {
-      auto range = postponed_fusing_map_.equal_range(graph_node);
-      for (auto it = range.first; it != range.second; ++it) {
-        // If the number of arguments is less than the limit then the input can be fused
-        if (CountArgs_(graph_node, graph, false) <= CountArgsLimit_(graph_node)) {
-          auto* src = it->second;
-          auto* snode = post_dom_tree.nodes[src->index]->parent->gnode;
-          if (groups_[snode->index]->anchor_ref != nullptr) continue;
-          CommitFuse(src, snode);
-        }
-      }
-      postponed_fusing_map_.erase(graph_node);
-    }
+
+    ProcessPostponedFusing(graph_node, graph, post_dom_tree);
+
     // no actions for opaque nodes
     if (group_node->pattern == kOpaque) continue;
     // no actions needed if the current node have no dominator
@@ -362,85 +444,17 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     // Refuse the fusion if too many arguments are going to be in the fused function
     if (max_function_args_ > 0) {
       auto limit = CountArgsLimit_(graph_node);
-      if (limit > 0) {
-        if (CountFusedArgs(graph, graph_node) > limit) {
-          continue;
-        }
+      if (limit > 0 && CountFusedArgs(graph, graph_node) > limit) {
+        continue;
       }
     }
 
     if (phase == 2) {
-      // Fuse injective ops into intermediate tuples, if any
-      if (group_node->pattern > kInjective) continue;
-      Group* dom_parent_group = groups_[dom_parent_gindex];
-      Group* dom_root_group = dom_parent_group->FindRoot();
-      // If dom node group has a tuple as its root, we do not fuse tuple fields into it
-      if (dom_root_group->pattern == kTuple) continue;
-      if (dom_parent_group->pattern == kTuple && dom_root_group->pattern <= kInjective) {
-        // Now we know the tuple has been fused into subsequent injective ops
-        auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
-        // dom_root_group can also be tuple, as in inception layers
-        // CheckPath is needed to avoid fusing two intermediate tuples
-        if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-          CommitFuse(graph_node, dom_node->parent->gnode);
-        }
-      }
+      FuseInjectiveIntoTuple(graph_node, group_node, dom_node, dom_parent_gindex);
       continue;
     }
 
-    // Skip if current node is already fused to the parent.
-    if (groups_[dom_parent_gindex] != nullptr &&
-        group_node->FindRoot() == groups_[dom_parent_gindex]->FindRoot()) {
-      continue;
-    }
-    // Do not fuse into tuple for now
-    if (groups_[dom_parent_gindex]->pattern == kTuple) continue;
-    // Try to fuse current node to its post-dominator.
-    if (group_node->pattern == kOutEWiseFusable) {
-      if (phase != 0) continue;
-      // Path for OutEWiseFusable: conv2d
-      // Check if the dominator relation is elemwise.
-      if (dom_node->parent != nullptr && dom_node->pattern == kElemWise) {
-        ICHECK(dom_node->parent->gnode != nullptr);
-        // The fuse can be executed if all the intermediate ops are still broadcast.
-        auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; };
-        if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-          CommitFuse(graph_node, dom_node->parent->gnode);
-        }
-      }
-    } else if (group_node->pattern <= kBroadcast) {
-      // Pre-condition: can only be fused to parent which is injective or reduction.
-      if (dom_node->parent != nullptr &&
-          (dom_node->pattern <= kInjective || dom_node->pattern == kCommReduce)) {
-        // Check if all the intermediate ops are still broadcast.
-        // The final terminal node can already be fused to a OutEWiseFusable group.
-        auto fcond = [](OpPatternKind kind, bool is_sink) {
-          if (!is_sink) {
-            // Elemwise, broadcast, and injective ops on the parallel branches
-            // are allowed be fused to the elemwise/broadcast anchor.
-            return kind <= kInjective;
-          } else {
-            return (kind <= kBroadcast || kind == kCommReduce || kind == kInjective ||
-                    kind == kOutEWiseFusable);
-          }
-        };
-        if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-          CommitFuse(graph_node, dom_node->parent->gnode);
-        }
-      }
-    } else if (group_node->pattern == kInjective || group_node->pattern == kTuple) {
-      // defer injective fusion to second phase.
-      // so conv2d always finishes fusing.
-      if (phase != 1) continue;
-      // Check if all path are injective.
-      auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
-      if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
-        CommitFuse(graph_node, dom_node->parent->gnode);
-      }
-    } else {
-      // do nothing.
-      ICHECK(group_node->pattern == kCommReduce);
-    }
+    FuseToPostDominator(graph_node, group_node, dom_node, dom_parent_gindex, phase);
   }
 }
 
