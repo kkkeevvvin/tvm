@@ -108,6 +108,11 @@ def derived_object(cls: type) -> type:
     class TVMDerivedObject(metadata["cls"]):  # type: ignore
         """The derived object to avoid cyclic dependency."""
 
+        # Declare slots that __setattr__ already gate-keeps so they exist on
+        # the subclass — the apache-tvm-ffi PyPI wheel stamps __slots__ = ()
+        # on metadata["cls"], so without this `self._inst = ...` in __init__
+        # raises AttributeError. Same root cause as the BlockBuilder fix.
+        __slots__ = ("_inst", "key", "handle", "__weakref__")
         _cls = cls
         _type = "TVMDerivedObject"
 
