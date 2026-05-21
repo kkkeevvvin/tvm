@@ -585,7 +585,7 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
   IndexedForwardGraph::Node* seed = nullptr;
   // generate seed
-  while (seed = FindMinElemWise(unfused_ops)) {
+  while ((seed = FindMinElemWise(unfused_ops)) != nullptr) {
     // block = [ seed ]
     std::unordered_set<IndexedForwardGraph::Node*> block{seed};
     LOG(INFO) << "\nkElemWise op with min output_size:"
