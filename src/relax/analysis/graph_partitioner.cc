@@ -22,6 +22,11 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/function.h>
+#include <tvm/ir/op.h>
+#include <tvm/relax/block_builder.h>
+#include <tvm/relax/expr.h>
+#include <tvm/relax/struct_info.h>
+#include <tvm/relax/transform.h>
 #include <tvm/runtime/module.h>
 #include <tvm/runtime/tensor.h>
 #include <tvm/target/target.h>
@@ -29,6 +34,7 @@
 
 #include <chrono>
 #include <random>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -704,6 +710,113 @@ double TimePrimFuncLLVM(const tir::PrimFunc& func, int runs) {
   return total_us / runs;
 }
 
+// Find the call_tir Call bound to `var` in any relax function of `mod`.
+ffi::Optional<Call> FindCallTIR(const IRModule& mod, const Object* var) {
+  static const Op& call_tir_op = Op::Get("relax.call_tir");
+  for (const auto& kv : mod->functions) {
+    const auto* func = kv.second.as<FunctionNode>();
+    if (func == nullptr) continue;
+    for (const BindingBlock& block : func->body->blocks) {
+      for (const Binding& binding : block->bindings) {
+        const auto* vb = binding.as<VarBindingNode>();
+        if (vb == nullptr || vb->var.get() != var) continue;
+        const auto* call = vb->value.as<CallNode>();
+        if (call != nullptr && call->op.same_as(call_tir_op)) {
+          return ffi::GetRef<Call>(call);
+        }
+        return std::nullopt;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// Build a 2-op kPrimitive module chaining seed_call -> succ_call (connected on
+// `link_var`, the seed's output), run FuseTIR, and return the merged PrimFunc.
+// Every external input of either op -- including constant args -- becomes a
+// tensor param, so the merged kernel is self-contained. Handles the simple
+// single-link, single-output case; returns nullopt otherwise.
+ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& seed_call,
+                                            const Call& succ_call, const Object* link_var) {
+  static const Op& call_tir_op = Op::Get("relax.call_tir");
+  auto seed_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(seed_call->args[0])));
+  auto succ_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(succ_call->args[0])));
+
+  BlockBuilder bb = BlockBuilder::Create(std::nullopt);
+  GlobalVar seed_gv = bb->AddFunction(seed_pf, "p_seed");
+  GlobalVar succ_gv = bb->AddFunction(succ_pf, "p_succ");
+
+  ffi::Array<Var> params;
+  int pidx = 0;
+  ffi::Array<Expr> seed_args;
+  for (const Expr& a : Downcast<Tuple>(seed_call->args[1])->fields) {
+    Var param("p" + std::to_string(pidx++), GetStructInfo(a));
+    params.push_back(param);
+    seed_args.push_back(param);
+  }
+  Call seed_inner(call_tir_op, {seed_gv, Tuple(seed_args)}, Attrs(), seed_call->sinfo_args);
+
+  bb->BeginDataflowBlock();
+  Var seed_out = bb->Emit(seed_inner);
+
+  ffi::Array<Expr> succ_args;
+  for (const Expr& a : Downcast<Tuple>(succ_call->args[1])->fields) {
+    if (a.get() == link_var) {
+      succ_args.push_back(seed_out);  // the only edge: seed output feeds successor
+    } else {
+      Var param("p" + std::to_string(pidx++), GetStructInfo(a));
+      params.push_back(param);
+      succ_args.push_back(param);
+    }
+  }
+  Call succ_inner(call_tir_op, {succ_gv, Tuple(succ_args)}, Attrs(), succ_call->sinfo_args);
+  Var out = bb->EmitOutput(succ_inner);
+  BindingBlock blk = bb->EndBlock();
+
+  Expr body = bb->Normalize(out);
+  body = bb->Normalize(SeqExpr({blk}, body));
+  ffi::Map<ffi::String, ffi::Any> attrs;
+  attrs.Set(attr::kPrimitive, true);
+  Function fused(params, body, /*ret_struct_info=*/std::nullopt, /*is_pure=*/true, DictAttrs(attrs));
+  GlobalVar fused_gv = bb->AddFunction(fused, "fused_pair");
+
+  // Add a public `main` that calls fused_pair. The FuseTIR pass ends with
+  // DeadCodeElimination, which would otherwise reap the merged kernel since it
+  // has no caller in this standalone module.
+  ffi::Array<Var> main_params;
+  ffi::Array<Expr> main_args;
+  for (const Var& p : params) {
+    Var mp(p->name_hint() + "_in", GetStructInfo(p));
+    main_params.push_back(mp);
+    main_args.push_back(mp);
+  }
+  bb->BeginDataflowBlock();
+  Var main_out = bb->EmitOutput(Call(fused_gv, main_args));
+  BindingBlock main_blk = bb->EndBlock();
+  Expr main_body = bb->Normalize(SeqExpr({main_blk}, bb->Normalize(main_out)));
+  ffi::Map<ffi::String, ffi::Any> main_attrs;
+  main_attrs.Set(tvm::attr::kGlobalSymbol, ffi::String("main"));
+  Function main_fn(main_params, main_body, /*ret_struct_info=*/std::nullopt, /*is_pure=*/true,
+                   DictAttrs(main_attrs));
+  bb->AddFunction(main_fn, "main");
+
+  IRModule scratch = bb->GetContextIRModule();
+  try {
+    scratch = transform::FuseTIR()(scratch);
+  } catch (const tvm::Error& err) {
+    LOG(INFO) << "  FuseTIR failed: " << err.what();
+    return std::nullopt;
+  }
+  ffi::Optional<BaseFunc> merged = scratch->functions.Get(scratch->GetGlobalVar(fused_gv->name_hint));
+  if (merged) {
+    if (const auto* pf = merged.value().as<tir::PrimFuncNode>()) {
+      return ffi::GetRef<tir::PrimFunc>(pf);
+    }
+  }
+  LOG(INFO) << "  fused result is not a PrimFunc";
+  return std::nullopt;
+}
+
 }  // namespace
 
 double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node, int runs) {
@@ -747,6 +860,25 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   double succ_us = TimeNodePrimFunc(successor, /*runs=*/50);
   if (succ_us >= 0.0) {
     LOG(INFO) << "first successor avg latency over 50 runs: " << succ_us << " us";
+  }
+
+  // Build and time the fused seed->successor kernel (FuseTIR over a 2-op
+  // kPrimitive module), and compare against running the two ops separately.
+  ffi::Optional<Call> seed_call = FindCallTIR(mod_, seed->ref);
+  ffi::Optional<Call> succ_call = FindCallTIR(mod_, successor->ref);
+  if (seed_call && succ_call) {
+    ffi::Optional<tir::PrimFunc> fused =
+        BuildFusedPair(mod_, seed_call.value(), succ_call.value(), seed->ref);
+    if (fused) {
+      double fused_us = TimePrimFuncLLVM(fused.value(), /*runs=*/50);
+      if (fused_us >= 0.0) {
+        LOG(INFO) << "fused seed->successor avg latency over 50 runs: " << fused_us << " us"
+                  << "  (separate: seed " << seed_us << " + successor " << succ_us << " = "
+                  << (seed_us + succ_us) << " us)";
+      }
+    }
+  } else {
+    LOG(INFO) << "could not locate both call_tir bindings; skip fused timing";
   }
 }
 
