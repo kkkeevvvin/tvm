@@ -358,6 +358,9 @@ class GraphPartitioner {
 
   // Log the PrimFunc backing a node, resolved through node->gvar + mod_.
   void DumpNodePrimFunc(const char* label, const IndexedForwardGraph::Node* node);
+  // Build a node's PrimFunc on llvm and return the average wall-clock latency
+  // (microseconds) over `runs` executions on random CPU inputs; -1 on failure.
+  double TimeNodePrimFunc(const IndexedForwardGraph::Node* node, int runs);
   void RunTestProfile(const IndexedForwardGraph& graph);
 };
 

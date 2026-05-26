@@ -19,8 +19,16 @@
 
 #include "./graph_partitioner.h"
 
+#include <tvm/ffi/function.h>
+#include <tvm/ir/attrs.h>
+#include <tvm/ir/function.h>
+#include <tvm/runtime/module.h>
+#include <tvm/runtime/tensor.h>
+#include <tvm/target/target.h>
 #include <tvm/tir/function.h>
 
+#include <chrono>
+#include <random>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -622,6 +630,91 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   }
 }
 
+namespace {
+
+// Build `func` on llvm, run it `runs` times on random CPU inputs, and return
+// the average wall-clock latency in microseconds (-1 if the build fails). This
+// is the build path FoldConstant uses to JIT-evaluate call_tir candidates.
+double TimePrimFuncLLVM(const tir::PrimFunc& func, int runs) {
+  Target target("llvm");
+  DLDevice cpu_dev = {kDLCPU, 0};
+
+  ffi::Function kernel;
+  try {
+    const auto build = tvm::ffi::Function::GetGlobalRequired("tir.build");
+    tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, ffi::String("tir_function"));
+    ffi::Module rt_module = build(named, target).cast<ffi::Module>();
+    kernel = rt_module->GetFunction("tir_function").value();
+  } catch (const tvm::Error& err) {
+    LOG(INFO) << "  build failed: " << err.what();
+    return -1.0;
+  }
+
+  // One CPU tensor per buffer param (inputs + outputs, in param order); fill
+  // float32 buffers with random values in [-1, 1].
+  std::mt19937 rng(0);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+  std::vector<runtime::Tensor> args;
+  for (const tir::Var& param : func->params) {
+    ffi::Optional<tir::Buffer> opt_buf = func->buffer_map.Get(param);
+    if (!opt_buf) {
+      LOG(INFO) << "  param " << param << " is not a buffer; skip profiling";
+      return -1.0;
+    }
+    tir::Buffer buf = opt_buf.value();
+    std::vector<int64_t> shape;
+    for (const PrimExpr& dim : buf->shape) {
+      const auto* imm = dim.as<IntImmNode>();
+      if (imm == nullptr) {
+        LOG(INFO) << "  param " << param << " has a dynamic shape; skip profiling";
+        return -1.0;
+      }
+      shape.push_back(imm->value);
+    }
+    runtime::Tensor t = runtime::Tensor::Empty(ffi::Shape(shape), buf->dtype, cpu_dev);
+    if (buf->dtype == DataType::Float(32)) {
+      int64_t numel = 1;
+      for (int64_t d : shape) numel *= d;
+      float* p = static_cast<float*>(t->data);
+      for (int64_t i = 0; i < numel; ++i) p[i] = dist(rng);
+    }
+    args.push_back(t);
+  }
+
+  // Pack args once (AnyView is non-owning, so `args` must outlive the calls).
+  std::vector<ffi::AnyView> packed(args.size());
+  for (size_t i = 0; i < args.size(); ++i) packed[i] = args[i];
+
+  // Warmup (untimed): absorb cold-cache / first-dispatch cost so the timed
+  // runs measure steady-state latency.
+  {
+    ffi::Any ret;
+    kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
+  }
+
+  // Time `runs` invocations.
+  double total_us = 0.0;
+  for (int r = 0; r < runs; ++r) {
+    ffi::Any ret;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    total_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
+  }
+  return total_us / runs;
+}
+
+}  // namespace
+
+double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node, int runs) {
+  if (node->gvar == nullptr) {
+    LOG(INFO) << "  node has no PrimFunc; skip profiling";
+    return -1.0;
+  }
+  return TimePrimFuncLLVM(
+      Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), runs);
+}
+
 void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   LOG(INFO) << "\nTest profile\n";
   std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
@@ -634,6 +727,12 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   LOG(INFO) << "seed: node[" << seed->index << "] " << ffi::GetRef<ObjectRef>(seed->ref)
             << " (pattern=" << seed->pattern << ", bytes=" << seed->output_size << ")";
 
+  // Build and time the seed operator on random input, averaged over 50 runs.
+  double seed_us = TimeNodePrimFunc(seed, /*runs=*/50);
+  if (seed_us >= 0.0) {
+    LOG(INFO) << "seed avg latency over 50 runs: " << seed_us << " us";
+  }
+
   // First successor = head of the seed's forward-edge list.
   if (seed->outputs.head == nullptr) {
     LOG(INFO) << "seed has no successor";
@@ -643,6 +742,12 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   LOG(INFO) << "first successor: node[" << successor->index << "] "
             << ffi::GetRef<ObjectRef>(successor->ref)
             << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
+
+  // Time the successor operator on its own, averaged over 50 runs.
+  double succ_us = TimeNodePrimFunc(successor, /*runs=*/50);
+  if (succ_us >= 0.0) {
+    LOG(INFO) << "first successor avg latency over 50 runs: " << succ_us << " us";
+  }
 }
 
 }  // namespace relax
