@@ -160,6 +160,10 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
     this->RunDNNFuse(graph);
     return std::move(groups_);
   }
+  if (opt_level_ == 7) {
+    this->RunTestProfile(graph);
+    return std::move(groups_);
+  }
   // get post dominator tree
   auto post_dom_tree = DominatorTree::PostDom(arena_, graph);
   // run fusion algorithm.
@@ -616,6 +620,29 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
+}
+
+void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
+  LOG(INFO) << "\nTest profile\n";
+  std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
+      graph.post_dfs_order.begin(), graph.post_dfs_order.end());
+  IndexedForwardGraph::Node* seed = FindMinElemWise(unfused_ops);
+  if (seed == nullptr) {
+    LOG(INFO) << "no kElemWise seed found";
+    return;
+  }
+  LOG(INFO) << "seed: node[" << seed->index << "] " << ffi::GetRef<ObjectRef>(seed->ref)
+            << " (pattern=" << seed->pattern << ", bytes=" << seed->output_size << ")";
+
+  // First successor = head of the seed's forward-edge list.
+  if (seed->outputs.head == nullptr) {
+    LOG(INFO) << "seed has no successor";
+    return;
+  }
+  IndexedForwardGraph::Node* successor = seed->outputs.head->value.node;
+  LOG(INFO) << "first successor: node[" << successor->index << "] "
+            << ffi::GetRef<ObjectRef>(successor->ref)
+            << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
 }
 
 }  // namespace relax

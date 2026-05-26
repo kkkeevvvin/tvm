@@ -358,6 +358,7 @@ class GraphPartitioner {
 
   // Log the PrimFunc backing a node, resolved through node->gvar + mod_.
   void DumpNodePrimFunc(const char* label, const IndexedForwardGraph::Node* node);
+  void RunTestProfile(const IndexedForwardGraph& graph);
 };
 
 }  // namespace relax
