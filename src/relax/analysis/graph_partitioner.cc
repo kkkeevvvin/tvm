@@ -19,6 +19,8 @@
 
 #include "./graph_partitioner.h"
 
+#include <tvm/tir/function.h>
+
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -575,6 +577,18 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
     FusePredecessor(predecessor, link->value.node, block);
   }
+}
+
+void GraphPartitioner::DumpNodePrimFunc(const char* label,
+                                        const IndexedForwardGraph::Node* node) {
+  if (node->gvar == nullptr) {
+    LOG(INFO) << "    " << label << " node[" << node->index << "]: no PrimFunc";
+    return;
+  }
+  GlobalVar gvar = ffi::GetRef<GlobalVar>(node->gvar);
+  LOG(INFO) << "    " << label << " node[" << node->index << "] PrimFunc " << node->gvar->name_hint
+            << ":\n"
+            << Downcast<tir::PrimFunc>(mod_->Lookup(gvar));
 }
 
 void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {

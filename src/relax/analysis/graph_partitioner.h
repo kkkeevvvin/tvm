@@ -74,6 +74,12 @@ class IndexedForwardGraph {
     OpPatternKind pattern{kOpaque};
     /*! \brief Output size in bytes; -1 if unknown / dynamic / opaque sinfo. */
     int64_t output_size{-1};
+    /*!
+     * \brief Weak reference to the call_tir GlobalVar this node invokes; nullptr for
+     *  non-call_tir nodes. Non-owning (like `ref`) so Node stays arena-safe -- the
+     *  GlobalVarNode is owned by the IRModule, which outlives partitioning.
+     */
+    const GlobalVarNode* gvar{nullptr};
     /*! \brief The outputs of the node. */
     LinkedList<Edge> outputs;
     /*! \brief The inputs of the node. */
@@ -349,6 +355,9 @@ class GraphPartitioner {
                      std::unordered_set<IndexedForwardGraph::Node*>* block);
   void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
                        std::unordered_set<IndexedForwardGraph::Node*>* block);
+
+  // Log the PrimFunc backing a node, resolved through node->gvar + mod_.
+  void DumpNodePrimFunc(const char* label, const IndexedForwardGraph::Node* node);
 };
 
 }  // namespace relax
