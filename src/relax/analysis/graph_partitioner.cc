@@ -559,7 +559,7 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // For the ambiguous kFuseDepend case, fuse only if profiling says the fused
   // kernel beats running the two ops separately. kFuseThrough short-circuits
   // past the profiler and fuses unconditionally.
-  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(sp, successor, /*runs=*/50)) {
+  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(sp, successor)) {
     LOG(INFO) << "    kFuseDepend: not profitable - Skip CommitFuse";
     return;
   }
@@ -598,7 +598,7 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   // For the ambiguous kFuseDepend case, fuse only if profiling says the fused
   // kernel beats running the two ops separately. kFuseThrough short-circuits
   // past the profiler and fuses unconditionally.
-  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(predecessor, sp, /*runs=*/50)) {
+  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(predecessor, sp)) {
     LOG(INFO) << "    kFuseDepend: not profitable - Skip CommitFuse";
     return;
   }
@@ -651,13 +651,17 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
 
 namespace {
 
+// Sample count for the in-pass cost oracle: TimePrimFuncCUDA averages over this
+// many timed device runs (after one untimed warmup).
+constexpr int kProfileRuns = 100;
+
 // GPU-schedule `func` (DefaultGPUSchedule), build it on the GTX 1070 CUDA
-// target, run it `runs` times on random device inputs, and return the average
+// target, run it kProfileRuns times on random device inputs, and return the average
 // wall-clock latency in microseconds (-1 if the build fails). An unscheduled
 // PrimFunc has no thread bindings, so DefaultGPUSchedule must run before
 // tir.build; CUDA launches are async, so each timed run ends with a device
 // StreamSync before the clock stops.
-double TimePrimFuncCUDA(const tir::PrimFunc& func, int runs) {
+double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   Target target("nvidia/geforce-gtx-1070");
   DLDevice cuda_dev = {kDLCUDA, 0};
   DLDevice cpu_dev = {kDLCPU, 0};
@@ -731,10 +735,10 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func, int runs) {
     dev_api->StreamSync(cuda_dev, nullptr);
   }
 
-  // Time `runs` invocations; sync after each launch so the clock captures
+  // Time kProfileRuns invocations; sync after each launch so the clock captures
   // device execution rather than just the async dispatch.
   double total_us = 0.0;
-  for (int r = 0; r < runs; ++r) {
+  for (int r = 0; r < kProfileRuns; ++r) {
     ffi::Any ret;
     auto t0 = std::chrono::high_resolution_clock::now();
     kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
@@ -742,7 +746,7 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func, int runs) {
     auto t1 = std::chrono::high_resolution_clock::now();
     total_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
   }
-  return total_us / runs;
+  return total_us / kProfileRuns;
 }
 
 // Find the call_tir Call bound to `var` in any relax function of `mod`.
@@ -854,17 +858,17 @@ ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& see
 
 }  // namespace
 
-double GraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node, int runs) {
+double GraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node) {
   if (node->gvar == nullptr) {
     LOG(INFO) << "  node has no PrimFunc; skip profiling";
     return -1.0;
   }
   return TimePrimFuncCUDA(
-      Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), runs);
+      Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))));
 }
 
 double GraphPartitioner::TimeFusedPair(const IndexedForwardGraph::Node* src,
-                                       const IndexedForwardGraph::Node* sink, int runs) {
+                                       const IndexedForwardGraph::Node* sink) {
   // Build the fused src->sink kernel (FuseTIR over a 2-op kPrimitive module,
   // linked on src's output) and time it; -1.0 if either op lacks a call_tir
   // binding or the fused PrimFunc cannot be built.
@@ -874,23 +878,23 @@ double GraphPartitioner::TimeFusedPair(const IndexedForwardGraph::Node* src,
   ffi::Optional<tir::PrimFunc> fused =
       BuildFusedPair(mod_, src_call.value(), sink_call.value(), src->ref);
   if (!fused) return -1.0;
-  return TimePrimFuncCUDA(fused.value(), runs);
+  return TimePrimFuncCUDA(fused.value());
 }
 
 bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
-                                  IndexedForwardGraph::Node* sink, int runs) {
+                                  IndexedForwardGraph::Node* sink) {
   // Time each op standalone and the fused src->sink kernel (any -1.0 = a
   // PrimFunc lookup / build / timing failure), then fuse only if the fused
   // kernel beats the separate sum.
-  double src_latency = TimeNode(src, runs);
-  double sink_latency = TimeNode(sink, runs);
-  double fused_latency = TimeFusedPair(src, sink, runs);
+  double src_latency = TimeNode(src);
+  double sink_latency = TimeNode(sink);
+  double fused_latency = TimeFusedPair(src, sink);
   if (src_latency < 0.0 || sink_latency < 0.0 || fused_latency < 0.0) return false;
 
   bool profitable = fused_latency < src_latency + sink_latency;
   LOG(INFO) << "    profile: fused = " << fused_latency << " us vs separate "
-            << (src_latency + sink_latency) << " us (avg cuda over " << runs << " runs) -> "
-            << (profitable ? "fuse" : "skip");
+            << (src_latency + sink_latency) << " us (avg cuda over " << kProfileRuns
+            << " runs) -> " << (profitable ? "fuse" : "skip");
   return profitable;
 }
 

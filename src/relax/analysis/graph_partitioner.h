@@ -359,18 +359,18 @@ class GraphPartitioner {
   // Log the PrimFunc backing a node, resolved through node->gvar + mod_.
   void DumpNodePrimFunc(const char* label, const IndexedForwardGraph::Node* node);
   // GPU-schedule + build a node's PrimFunc on cuda and return the average
-  // wall-clock latency (microseconds) over `runs` device executions; -1 on failure.
-  double TimeNode(const IndexedForwardGraph::Node* node, int runs);
+  // wall-clock latency (microseconds) over kProfileRuns device executions; -1 on failure.
+  double TimeNode(const IndexedForwardGraph::Node* node);
   // Build the fused src->sink PrimFunc (FuseTIR over a 2-op kPrimitive module)
   // and time it on cuda; -1 if either op lacks a call_tir binding or the fused
   // kernel cannot be built. The node counterpart of TimeNode.
   double TimeFusedPair(const IndexedForwardGraph::Node* src,
-                       const IndexedForwardGraph::Node* sink, int runs);
+                       const IndexedForwardGraph::Node* sink);
   // Profile producer + consumer in isolation and as a fused pair, logging the
   // fused-vs-separate comparison. Returns true iff the fused kernel is faster
   // than the two run separately (false if anything could not be timed). Used by
   // FuseSuccessor / FusePredecessor to gate the ambiguous kFuseDepend case.
-  bool FuseProfit(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink, int runs);
+  bool FuseProfit(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
 };
 
 }  // namespace relax
