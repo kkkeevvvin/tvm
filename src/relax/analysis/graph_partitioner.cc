@@ -22,15 +22,19 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/function.h>
+#include <tvm/ir/module.h>
 #include <tvm/ir/op.h>
 #include <tvm/relax/block_builder.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/struct_info.h>
 #include <tvm/relax/transform.h>
+#include <tvm/runtime/device_api.h>
 #include <tvm/runtime/module.h>
 #include <tvm/runtime/tensor.h>
+#include <tvm/support/with.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/function.h>
+#include <tvm/tir/transform.h>
 
 #include <chrono>
 #include <random>
@@ -638,26 +642,43 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
 
 namespace {
 
-// Build `func` on llvm, run it `runs` times on random CPU inputs, and return
-// the average wall-clock latency in microseconds (-1 if the build fails). This
-// is the build path FoldConstant uses to JIT-evaluate call_tir candidates.
-double TimePrimFuncLLVM(const tir::PrimFunc& func, int runs) {
-  Target target("llvm");
+// GPU-schedule `func` (DefaultGPUSchedule), build it on the GTX 1070 CUDA
+// target, run it `runs` times on random device inputs, and return the average
+// wall-clock latency in microseconds (-1 if the build fails). An unscheduled
+// PrimFunc has no thread bindings, so DefaultGPUSchedule must run before
+// tir.build; CUDA launches are async, so each timed run ends with a device
+// StreamSync before the clock stops.
+double TimePrimFuncCUDA(const tir::PrimFunc& func, int runs) {
+  Target target("nvidia/geforce-gtx-1070");
+  DLDevice cuda_dev = {kDLCUDA, 0};
   DLDevice cpu_dev = {kDLCPU, 0};
 
   ffi::Function kernel;
   try {
-    const auto build = tvm::ffi::Function::GetGlobalRequired("tir.build");
+    // DefaultGPUSchedule reads Target::Current(); keep build under the same
+    // scope so the func is bound to the CUDA target during host/device split.
+    tvm::With<Target> target_scope(target);
     tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, ffi::String("tir_function"));
-    ffi::Module rt_module = build(named, target).cast<ffi::Module>();
+    // DefaultGPUSchedule is a module pass; wrap, schedule, then build the
+    // scheduled PrimFunc (now carrying blockIdx.x / threadIdx.x bindings).
+    GlobalVar gv("tir_function");
+    ffi::Map<GlobalVar, BaseFunc> funcs;
+    funcs.Set(gv, named);
+    IRModule m(funcs);
+    m = tir::transform::DefaultGPUSchedule()(m);
+    tir::PrimFunc scheduled = Downcast<tir::PrimFunc>(m->Lookup(gv));
+
+    const auto build = tvm::ffi::Function::GetGlobalRequired("tir.build");
+    ffi::Module rt_module = build(scheduled, target).cast<ffi::Module>();
     kernel = rt_module->GetFunction("tir_function").value();
   } catch (const tvm::Error& err) {
     LOG(INFO) << "  build failed: " << err.what();
     return -1.0;
   }
 
-  // One CPU tensor per buffer param (inputs + outputs, in param order); fill
-  // float32 buffers with random values in [-1, 1].
+  // One device tensor per buffer param (inputs + outputs, in param order); fill
+  // float32 buffers with random values in [-1, 1] on the host, then copy to GPU
+  // (kernels can't be fed host pointers, and we can't write GPU memory directly).
   std::mt19937 rng(0);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
   std::vector<runtime::Tensor> args;
@@ -677,33 +698,38 @@ double TimePrimFuncLLVM(const tir::PrimFunc& func, int runs) {
       }
       shape.push_back(imm->value);
     }
-    runtime::Tensor t = runtime::Tensor::Empty(ffi::Shape(shape), buf->dtype, cpu_dev);
+    runtime::Tensor host_t = runtime::Tensor::Empty(ffi::Shape(shape), buf->dtype, cpu_dev);
     if (buf->dtype == DataType::Float(32)) {
       int64_t numel = 1;
       for (int64_t d : shape) numel *= d;
-      float* p = static_cast<float*>(t->data);
+      float* p = static_cast<float*>(host_t->data);
       for (int64_t i = 0; i < numel; ++i) p[i] = dist(rng);
     }
-    args.push_back(t);
+    args.push_back(host_t.CopyTo(cuda_dev));  // CopyTo triggers a TVMSynchronize
   }
 
   // Pack args once (AnyView is non-owning, so `args` must outlive the calls).
   std::vector<ffi::AnyView> packed(args.size());
   for (size_t i = 0; i < args.size(); ++i) packed[i] = args[i];
 
-  // Warmup (untimed): absorb cold-cache / first-dispatch cost so the timed
-  // runs measure steady-state latency.
+  runtime::DeviceAPI* dev_api = runtime::DeviceAPI::Get(cuda_dev);
+
+  // Warmup (untimed): absorb cold-cache / first-dispatch (PTX JIT) cost so the
+  // timed runs measure steady-state latency.
   {
     ffi::Any ret;
     kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
+    dev_api->StreamSync(cuda_dev, nullptr);
   }
 
-  // Time `runs` invocations.
+  // Time `runs` invocations; sync after each launch so the clock captures
+  // device execution rather than just the async dispatch.
   double total_us = 0.0;
   for (int r = 0; r < runs; ++r) {
     ffi::Any ret;
     auto t0 = std::chrono::high_resolution_clock::now();
     kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
+    dev_api->StreamSync(cuda_dev, nullptr);
     auto t1 = std::chrono::high_resolution_clock::now();
     total_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
   }
@@ -824,7 +850,7 @@ double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node,
     LOG(INFO) << "  node has no PrimFunc; skip profiling";
     return -1.0;
   }
-  return TimePrimFuncLLVM(
+  return TimePrimFuncCUDA(
       Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), runs);
 }
 
@@ -840,7 +866,9 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   // returns the avg latency in us (<0 if the build/profile was skipped).
   auto time_node = [&](const char* label, const IndexedForwardGraph::Node* node) {
     double us = TimeNodePrimFunc(node, kRuns);
-    if (us >= 0.0) LOG(INFO) << label << " avg latency over " << kRuns << " runs: " << us << " us";
+    if (us >= 0.0) {
+      LOG(INFO) << label << " avg cuda latency over " << kRuns << " runs: " << us << " us";
+    }
     return us;
   };
 
@@ -874,9 +902,9 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   ffi::Optional<tir::PrimFunc> fused =
       BuildFusedPair(mod_, seed_call.value(), succ_call.value(), seed->ref);
   if (!fused) return;
-  double fused_us = TimePrimFuncLLVM(fused.value(), kRuns);
+  double fused_us = TimePrimFuncCUDA(fused.value(), kRuns);
   if (fused_us >= 0.0) {
-    LOG(INFO) << "fused seed->successor avg latency over " << kRuns << " runs: " << fused_us
+    LOG(INFO) << "fused seed->successor avg cuda latency over " << kRuns << " runs: " << fused_us
               << " us  (separate: seed " << seed_us << " + successor " << succ_us << " = "
               << (seed_us + succ_us) << " us)";
   }
