@@ -863,35 +863,34 @@ double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node,
       Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), runs);
 }
 
-bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* producer,
-                                  IndexedForwardGraph::Node* consumer, int runs) {
+bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
+                                  IndexedForwardGraph::Node* sink, int runs) {
   // Time the two ops in isolation (-1 = no PrimFunc / build skipped).
-  double prod_us = TimeNodePrimFunc(producer, runs);
-  double cons_us = TimeNodePrimFunc(consumer, runs);
-  LOG(INFO) << "    profile: node[" << producer->index << "] = " << prod_us << " us, node["
-            << consumer->index << "] = " << cons_us << " us (avg cuda over " << runs << " runs)";
-  if (prod_us < 0.0 || cons_us < 0.0) {
+  double src_us = TimeNodePrimFunc(src, runs);
+  double sink_us = TimeNodePrimFunc(sink, runs);
+  LOG(INFO) << "    profile: node[" << src->index << "] = " << src_us << " us, node["
+            << sink->index << "] = " << sink_us << " us (avg cuda over " << runs << " runs)";
+  if (src_us < 0.0 || sink_us < 0.0) {
     LOG(INFO) << "    profile: a candidate could not be timed; skip fused timing";
     return false;
   }
 
-  // Build and time the fused producer->consumer kernel (FuseTIR over a 2-op
-  // kPrimitive module, linked on the producer's output) and compare against the
-  // separate sum.
-  ffi::Optional<Call> prod_call = FindCallTIR(mod_, producer->ref);
-  ffi::Optional<Call> cons_call = FindCallTIR(mod_, consumer->ref);
-  if (!prod_call || !cons_call) {
+  // Build and time the fused src->sink kernel (FuseTIR over a 2-op kPrimitive
+  // module, linked on src's output) and compare against the separate sum.
+  ffi::Optional<Call> src_call = FindCallTIR(mod_, src->ref);
+  ffi::Optional<Call> sink_call = FindCallTIR(mod_, sink->ref);
+  if (!src_call || !sink_call) {
     LOG(INFO) << "    profile: missing call_tir binding; skip fused timing";
     return false;
   }
   ffi::Optional<tir::PrimFunc> fused =
-      BuildFusedPair(mod_, prod_call.value(), cons_call.value(), producer->ref);
+      BuildFusedPair(mod_, src_call.value(), sink_call.value(), src->ref);
   if (!fused) return false;
   double fused_us = TimePrimFuncCUDA(fused.value(), runs);
   if (fused_us < 0.0) return false;
 
-  bool profitable = fused_us < prod_us + cons_us;
-  LOG(INFO) << "    profile: fused = " << fused_us << " us vs separate " << (prod_us + cons_us)
+  bool profitable = fused_us < src_us + sink_us;
+  LOG(INFO) << "    profile: fused = " << fused_us << " us vs separate " << (src_us + sink_us)
             << " us (avg cuda over " << runs << " runs) -> " << (profitable ? "fuse" : "skip");
   return profitable;
 }
