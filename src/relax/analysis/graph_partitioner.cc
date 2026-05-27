@@ -854,22 +854,45 @@ double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node,
       Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), runs);
 }
 
+bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* producer,
+                                  IndexedForwardGraph::Node* consumer, int runs) {
+  // Time the two ops in isolation (-1 = no PrimFunc / build skipped).
+  double prod_us = TimeNodePrimFunc(producer, runs);
+  double cons_us = TimeNodePrimFunc(consumer, runs);
+  LOG(INFO) << "    profile: node[" << producer->index << "] = " << prod_us << " us, node["
+            << consumer->index << "] = " << cons_us << " us (avg cuda over " << runs << " runs)";
+  if (prod_us < 0.0 || cons_us < 0.0) {
+    LOG(INFO) << "    profile: a candidate could not be timed; skip fused timing";
+    return false;
+  }
+
+  // Build and time the fused producer->consumer kernel (FuseTIR over a 2-op
+  // kPrimitive module, linked on the producer's output) and compare against the
+  // separate sum.
+  ffi::Optional<Call> prod_call = FindCallTIR(mod_, producer->ref);
+  ffi::Optional<Call> cons_call = FindCallTIR(mod_, consumer->ref);
+  if (!prod_call || !cons_call) {
+    LOG(INFO) << "    profile: missing call_tir binding; skip fused timing";
+    return false;
+  }
+  ffi::Optional<tir::PrimFunc> fused =
+      BuildFusedPair(mod_, prod_call.value(), cons_call.value(), producer->ref);
+  if (!fused) return false;
+  double fused_us = TimePrimFuncCUDA(fused.value(), runs);
+  if (fused_us < 0.0) return false;
+
+  bool profitable = fused_us < prod_us + cons_us;
+  LOG(INFO) << "    profile: fused = " << fused_us << " us vs separate " << (prod_us + cons_us)
+            << " us (avg cuda over " << runs << " runs) -> " << (profitable ? "fuse" : "skip");
+  return profitable;
+}
+
 void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   LOG(INFO) << "\nTest profile\n";
-  constexpr int kRuns = 50;
 
   auto log_node = [](const char* label, const IndexedForwardGraph::Node* node) {
     LOG(INFO) << label << ": node[" << node->index << "] " << ffi::GetRef<ObjectRef>(node->ref)
               << " (pattern=" << node->pattern << ", bytes=" << node->output_size << ")";
-  };
-  // Build and time a node's standalone PrimFunc on random input; logs and
-  // returns the avg latency in us (<0 if the build/profile was skipped).
-  auto time_node = [&](const char* label, const IndexedForwardGraph::Node* node) {
-    double us = TimeNodePrimFunc(node, kRuns);
-    if (us >= 0.0) {
-      LOG(INFO) << label << " avg cuda latency over " << kRuns << " runs: " << us << " us";
-    }
-    return us;
   };
 
   std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
@@ -880,7 +903,6 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
     return;
   }
   log_node("seed", seed);
-  double seed_us = time_node("seed", seed);
 
   // First successor = head of the seed's forward-edge list.
   if (seed->outputs.head == nullptr) {
@@ -889,25 +911,8 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   }
   IndexedForwardGraph::Node* successor = seed->outputs.head->value.node;
   log_node("first successor", successor);
-  double succ_us = time_node("first successor", successor);
 
-  // Build and time the fused seed->successor kernel (FuseTIR over a 2-op
-  // kPrimitive module), and compare against running the two ops separately.
-  ffi::Optional<Call> seed_call = FindCallTIR(mod_, seed->ref);
-  ffi::Optional<Call> succ_call = FindCallTIR(mod_, successor->ref);
-  if (!seed_call || !succ_call) {
-    LOG(INFO) << "could not locate both call_tir bindings; skip fused timing";
-    return;
-  }
-  ffi::Optional<tir::PrimFunc> fused =
-      BuildFusedPair(mod_, seed_call.value(), succ_call.value(), seed->ref);
-  if (!fused) return;
-  double fused_us = TimePrimFuncCUDA(fused.value(), kRuns);
-  if (fused_us >= 0.0) {
-    LOG(INFO) << "fused seed->successor avg cuda latency over " << kRuns << " runs: " << fused_us
-              << " us  (separate: seed " << seed_us << " + successor " << succ_us << " = "
-              << (seed_us + succ_us) << " us)";
-  }
+  FuseProfit(seed, successor, /*runs=*/50);
 }
 
 }  // namespace relax
