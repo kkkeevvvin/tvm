@@ -553,17 +553,22 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
     return kind <= kInjective;
   };
   if (!CheckPath(sp, successor, fcond)) {
-    LOG(INFO) << "    CheckPath: false - Skip CommitFuse";
+    LOG(INFO) << "    CheckPath: false";
     return;
   }
+  LOG(INFO) << "    CheckPath: true";
   // For the ambiguous kFuseDepend case, fuse only if profiling says the fused
   // kernel beats running the two ops separately. kFuseThrough short-circuits
   // past the profiler and fuses unconditionally.
-  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(sp, successor)) {
-    LOG(INFO) << "    kFuseDepend: not profitable - Skip CommitFuse";
-    return;
+  if (relation == DNNFuseRelation::kFuseDepend) {
+    bool profitable = FuseProfit(sp, successor);
+    if (!profitable) {
+      LOG(INFO) << "    kFuseDepend: not profitable";
+      return;
+    }
+    LOG(INFO) << "    kFuseDepend: profitable";
   }
-  LOG(INFO) << "    CheckPath: true - CommitFuse";
+  LOG(INFO) << "    CommitFuse";
   CommitFuse(sp, successor);
   block->insert(successor);
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
@@ -592,17 +597,22 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
     return kind <= kInjective;
   };
   if (!CheckPath(predecessor, sp, fcond)) {
-    LOG(INFO) << "    CheckPath: false - Skip";
+    LOG(INFO) << "    CheckPath: false";
     return;
   }
+  LOG(INFO) << "    CheckPath: true";
   // For the ambiguous kFuseDepend case, fuse only if profiling says the fused
   // kernel beats running the two ops separately. kFuseThrough short-circuits
   // past the profiler and fuses unconditionally.
-  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(predecessor, sp)) {
-    LOG(INFO) << "    kFuseDepend: not profitable - Skip CommitFuse";
-    return;
+  if (relation == DNNFuseRelation::kFuseDepend) {
+    bool profitable = FuseProfit(predecessor, sp);
+    if (!profitable) {
+      LOG(INFO) << "    kFuseDepend: not profitable";
+      return;
+    }
+    LOG(INFO) << "    kFuseDepend: profitable";
   }
-  LOG(INFO) << "    CheckPath: true - CommitFuse";
+  LOG(INFO) << "    CommitFuse";
   CommitFuse(predecessor, sp);
   block->insert(predecessor);
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
@@ -633,8 +643,7 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   while ((seed = FindMinElemWise(unfused_ops)) != nullptr) {
     // block = [ seed ]
     std::unordered_set<IndexedForwardGraph::Node*> block{seed};
-    LOG(INFO) << "\nkElemWise op with min output_size:"
-              << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
+    LOG(INFO) << "seed: node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
               << " bytes=" << seed->output_size;
     // head to successor
     for (auto* link = seed->outputs.head; link != nullptr; link = link->next) {
