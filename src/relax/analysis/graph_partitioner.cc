@@ -863,31 +863,29 @@ double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node,
       Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), runs);
 }
 
-bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
-                                  IndexedForwardGraph::Node* sink, int runs) {
-  // Time the two ops in isolation (-1 = no PrimFunc / build skipped).
-  double src_us = TimeNodePrimFunc(src, runs);
-  double sink_us = TimeNodePrimFunc(sink, runs);
-  LOG(INFO) << "    profile: node[" << src->index << "] = " << src_us << " us, node["
-            << sink->index << "] = " << sink_us << " us (avg cuda over " << runs << " runs)";
-  if (src_us < 0.0 || sink_us < 0.0) {
-    LOG(INFO) << "    profile: a candidate could not be timed; skip fused timing";
-    return false;
-  }
-
-  // Build and time the fused src->sink kernel (FuseTIR over a 2-op kPrimitive
-  // module, linked on src's output) and compare against the separate sum.
+double GraphPartitioner::TimeFusedPair(const IndexedForwardGraph::Node* src,
+                                       const IndexedForwardGraph::Node* sink, int runs) {
+  // Build the fused src->sink kernel (FuseTIR over a 2-op kPrimitive module,
+  // linked on src's output) and time it; -1.0 if either op lacks a call_tir
+  // binding or the fused PrimFunc cannot be built.
   ffi::Optional<Call> src_call = FindCallTIR(mod_, src->ref);
   ffi::Optional<Call> sink_call = FindCallTIR(mod_, sink->ref);
-  if (!src_call || !sink_call) {
-    LOG(INFO) << "    profile: missing call_tir binding; skip fused timing";
-    return false;
-  }
+  if (!src_call || !sink_call) return -1.0;
   ffi::Optional<tir::PrimFunc> fused =
       BuildFusedPair(mod_, src_call.value(), sink_call.value(), src->ref);
-  if (!fused) return false;
-  double fused_us = TimePrimFuncCUDA(fused.value(), runs);
-  if (fused_us < 0.0) return false;
+  if (!fused) return -1.0;
+  return TimePrimFuncCUDA(fused.value(), runs);
+}
+
+bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
+                                  IndexedForwardGraph::Node* sink, int runs) {
+  // Time each op standalone and the fused src->sink kernel (any -1.0 = a
+  // PrimFunc lookup / build / timing failure), then fuse only if the fused
+  // kernel beats the separate sum.
+  double src_us = TimeNodePrimFunc(src, runs);
+  double sink_us = TimeNodePrimFunc(sink, runs);
+  double fused_us = TimeFusedPair(src, sink, runs);
+  if (src_us < 0.0 || sink_us < 0.0 || fused_us < 0.0) return false;
 
   bool profitable = fused_us < src_us + sink_us;
   LOG(INFO) << "    profile: fused = " << fused_us << " us vs separate " << (src_us + sink_us)
