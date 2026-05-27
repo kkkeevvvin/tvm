@@ -892,9 +892,8 @@ bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
   if (src_latency < 0.0 || sink_latency < 0.0 || fused_latency < 0.0) return false;
 
   bool profitable = fused_latency < src_latency + sink_latency;
-  LOG(INFO) << "    profile: fused = " << fused_latency << " us vs separate "
-            << (src_latency + sink_latency) << " us (avg cuda over " << kProfileRuns
-            << " runs) -> " << (profitable ? "fuse" : "skip");
+  LOG(INFO) << "    profile: fused = " << fused_latency << " us"
+            << " vs separate " << (src_latency + sink_latency) << " us";
   return profitable;
 }
 
