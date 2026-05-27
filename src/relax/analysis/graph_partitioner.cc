@@ -798,18 +798,16 @@ ffi::Optional<Call> FindCallTIR(const IRModule& mod, const Object* var) {
   return std::nullopt;
 }
 
-// Build a 2-op kPrimitive module chaining seed_call -> succ_call (connected on
-// `link_var`, the seed's output), run FuseTIR, and return the merged PrimFunc.
-// Every external input of either op -- including constant args -- becomes a
-// tensor param, so the merged kernel is self-contained. Handles the simple
-// single-link, single-output case; returns nullopt otherwise.
-ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& seed_call,
-                                            const Call& succ_call, const Object* link_var) {
+// Construct the inner `fused_pair` relax Function: a kPrimitive 2-op dataflow
+// chaining seed_call -> succ_call, connected on `link_var` (the seed's output).
+// Registers the two callee PrimFuncs (p_seed / p_succ) in `bb` and turns every
+// other external input -- including constants -- into a tensor param, so the
+// kernel is self-contained.
+Function MakeFusedPairFunc(BlockBuilder bb, const IRModule& mod, const Call& seed_call,
+                           const Call& succ_call, const Object* link_var) {
   static const Op& call_tir_op = Op::Get("relax.call_tir");
   auto seed_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(seed_call->args[0])));
   auto succ_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(succ_call->args[0])));
-
-  BlockBuilder bb = BlockBuilder::Create(std::nullopt);
   GlobalVar seed_gv = bb->AddFunction(seed_pf, "p_seed");
   GlobalVar succ_gv = bb->AddFunction(succ_pf, "p_succ");
 
@@ -844,12 +842,13 @@ ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& see
   body = bb->Normalize(SeqExpr({blk}, body));
   ffi::Map<ffi::String, ffi::Any> attrs;
   attrs.Set(attr::kPrimitive, true);
-  Function fused(params, body, /*ret_struct_info=*/std::nullopt, /*is_pure=*/true, DictAttrs(attrs));
-  GlobalVar fused_gv = bb->AddFunction(fused, "fused_pair");
+  return Function(params, body, /*ret_struct_info=*/std::nullopt, /*is_pure=*/true, DictAttrs(attrs));
+}
 
-  // Add a public `main` that calls fused_pair. The FuseTIR pass ends with
-  // DeadCodeElimination, which would otherwise reap the merged kernel since it
-  // has no caller in this standalone module.
+// Append a public `main` to `bb` that forwards fresh params straight to
+// `callee_gv`. FuseTIR ends with DeadCodeElimination, which would otherwise reap
+// the merged kernel since it has no caller in this standalone module.
+void AppendMainCaller(BlockBuilder bb, const GlobalVar& callee_gv, const ffi::Array<Var>& params) {
   ffi::Array<Var> main_params;
   ffi::Array<Expr> main_args;
   for (const Var& p : params) {
@@ -858,7 +857,7 @@ ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& see
     main_args.push_back(mp);
   }
   bb->BeginDataflowBlock();
-  Var main_out = bb->EmitOutput(Call(fused_gv, main_args));
+  Var main_out = bb->EmitOutput(Call(callee_gv, main_args));
   BindingBlock main_blk = bb->EndBlock();
   Expr main_body = bb->Normalize(SeqExpr({main_blk}, bb->Normalize(main_out)));
   ffi::Map<ffi::String, ffi::Any> main_attrs;
@@ -866,7 +865,11 @@ ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& see
   Function main_fn(main_params, main_body, /*ret_struct_info=*/std::nullopt, /*is_pure=*/true,
                    DictAttrs(main_attrs));
   bb->AddFunction(main_fn, "main");
+}
 
+// Run FuseTIR over bb's context module and return `target_gv`'s merged PrimFunc;
+// nullopt if FuseTIR throws or the result is not a PrimFunc.
+ffi::Optional<tir::PrimFunc> FuseTIRAndExtract(BlockBuilder bb, const GlobalVar& target_gv) {
   IRModule scratch = bb->GetContextIRModule();
   try {
     scratch = transform::FuseTIR()(scratch);
@@ -874,7 +877,8 @@ ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& see
     LOG(INFO) << "  FuseTIR failed: " << err.what();
     return std::nullopt;
   }
-  ffi::Optional<BaseFunc> merged = scratch->functions.Get(scratch->GetGlobalVar(fused_gv->name_hint));
+  ffi::Optional<BaseFunc> merged =
+      scratch->functions.Get(scratch->GetGlobalVar(target_gv->name_hint));
   if (merged) {
     if (const auto* pf = merged.value().as<tir::PrimFuncNode>()) {
       return ffi::GetRef<tir::PrimFunc>(pf);
@@ -882,6 +886,20 @@ ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& see
   }
   LOG(INFO) << "  fused result is not a PrimFunc";
   return std::nullopt;
+}
+
+// Build a 2-op kPrimitive module chaining seed_call -> succ_call (connected on
+// `link_var`, the seed's output), run FuseTIR, and return the merged PrimFunc.
+// Every external input of either op -- including constant args -- becomes a
+// tensor param, so the merged kernel is self-contained. Handles the simple
+// single-link, single-output case; returns nullopt otherwise.
+ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& seed_call,
+                                            const Call& succ_call, const Object* link_var) {
+  BlockBuilder bb = BlockBuilder::Create(std::nullopt);
+  Function fused = MakeFusedPairFunc(bb, mod, seed_call, succ_call, link_var);
+  GlobalVar fused_gv = bb->AddFunction(fused, "fused_pair");
+  AppendMainCaller(bb, fused_gv, fused->params);
+  return FuseTIRAndExtract(bb, fused_gv);
 }
 
 }  // namespace
