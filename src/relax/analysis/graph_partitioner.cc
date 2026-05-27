@@ -830,6 +830,20 @@ double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node,
 
 void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
   LOG(INFO) << "\nTest profile\n";
+  constexpr int kRuns = 50;
+
+  auto log_node = [](const char* label, const IndexedForwardGraph::Node* node) {
+    LOG(INFO) << label << ": node[" << node->index << "] " << ffi::GetRef<ObjectRef>(node->ref)
+              << " (pattern=" << node->pattern << ", bytes=" << node->output_size << ")";
+  };
+  // Build and time a node's standalone PrimFunc on random input; logs and
+  // returns the avg latency in us (<0 if the build/profile was skipped).
+  auto time_node = [&](const char* label, const IndexedForwardGraph::Node* node) {
+    double us = TimeNodePrimFunc(node, kRuns);
+    if (us >= 0.0) LOG(INFO) << label << " avg latency over " << kRuns << " runs: " << us << " us";
+    return us;
+  };
+
   std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
       graph.post_dfs_order.begin(), graph.post_dfs_order.end());
   IndexedForwardGraph::Node* seed = FindMinElemWise(unfused_ops);
@@ -837,14 +851,8 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
     LOG(INFO) << "no kElemWise seed found";
     return;
   }
-  LOG(INFO) << "seed: node[" << seed->index << "] " << ffi::GetRef<ObjectRef>(seed->ref)
-            << " (pattern=" << seed->pattern << ", bytes=" << seed->output_size << ")";
-
-  // Build and time the seed operator on random input, averaged over 50 runs.
-  double seed_us = TimeNodePrimFunc(seed, /*runs=*/50);
-  if (seed_us >= 0.0) {
-    LOG(INFO) << "seed avg latency over 50 runs: " << seed_us << " us";
-  }
+  log_node("seed", seed);
+  double seed_us = time_node("seed", seed);
 
   // First successor = head of the seed's forward-edge list.
   if (seed->outputs.head == nullptr) {
@@ -852,33 +860,25 @@ void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
     return;
   }
   IndexedForwardGraph::Node* successor = seed->outputs.head->value.node;
-  LOG(INFO) << "first successor: node[" << successor->index << "] "
-            << ffi::GetRef<ObjectRef>(successor->ref)
-            << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
-
-  // Time the successor operator on its own, averaged over 50 runs.
-  double succ_us = TimeNodePrimFunc(successor, /*runs=*/50);
-  if (succ_us >= 0.0) {
-    LOG(INFO) << "first successor avg latency over 50 runs: " << succ_us << " us";
-  }
+  log_node("first successor", successor);
+  double succ_us = time_node("first successor", successor);
 
   // Build and time the fused seed->successor kernel (FuseTIR over a 2-op
   // kPrimitive module), and compare against running the two ops separately.
   ffi::Optional<Call> seed_call = FindCallTIR(mod_, seed->ref);
   ffi::Optional<Call> succ_call = FindCallTIR(mod_, successor->ref);
-  if (seed_call && succ_call) {
-    ffi::Optional<tir::PrimFunc> fused =
-        BuildFusedPair(mod_, seed_call.value(), succ_call.value(), seed->ref);
-    if (fused) {
-      double fused_us = TimePrimFuncLLVM(fused.value(), /*runs=*/50);
-      if (fused_us >= 0.0) {
-        LOG(INFO) << "fused seed->successor avg latency over 50 runs: " << fused_us << " us"
-                  << "  (separate: seed " << seed_us << " + successor " << succ_us << " = "
-                  << (seed_us + succ_us) << " us)";
-      }
-    }
-  } else {
+  if (!seed_call || !succ_call) {
     LOG(INFO) << "could not locate both call_tir bindings; skip fused timing";
+    return;
+  }
+  ffi::Optional<tir::PrimFunc> fused =
+      BuildFusedPair(mod_, seed_call.value(), succ_call.value(), seed->ref);
+  if (!fused) return;
+  double fused_us = TimePrimFuncLLVM(fused.value(), kRuns);
+  if (fused_us >= 0.0) {
+    LOG(INFO) << "fused seed->successor avg latency over " << kRuns << " runs: " << fused_us
+              << " us  (separate: seed " << seed_us << " + successor " << succ_us << " = "
+              << (seed_us + succ_us) << " us)";
   }
 }
 
