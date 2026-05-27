@@ -854,7 +854,7 @@ ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& see
 
 }  // namespace
 
-double GraphPartitioner::TimeNodePrimFunc(const IndexedForwardGraph::Node* node, int runs) {
+double GraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node, int runs) {
   if (node->gvar == nullptr) {
     LOG(INFO) << "  node has no PrimFunc; skip profiling";
     return -1.0;
@@ -882,8 +882,8 @@ bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
   // Time each op standalone and the fused src->sink kernel (any -1.0 = a
   // PrimFunc lookup / build / timing failure), then fuse only if the fused
   // kernel beats the separate sum.
-  double src_us = TimeNodePrimFunc(src, runs);
-  double sink_us = TimeNodePrimFunc(sink, runs);
+  double src_us = TimeNode(src, runs);
+  double sink_us = TimeNode(sink, runs);
   double fused_us = TimeFusedPair(src, sink, runs);
   if (src_us < 0.0 || sink_us < 0.0 || fused_us < 0.0) return false;
 
