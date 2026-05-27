@@ -65,17 +65,17 @@ const char* DNNFuseRelationName(DNNFuseRelation decision) {
   return "unknown";
 }
 
-DNNFuseRelation ClassifyDNNFuseRelation(OpPatternKind producer, OpPatternKind consumer) {
-  if (producer == kOutEWiseFusable && (consumer == kBroadcast || consumer == kInjective)) {
+DNNFuseRelation ClassifyDNNFuseRelation(OpPatternKind src, OpPatternKind sink) {
+  if (src == kOutEWiseFusable && (sink == kBroadcast || sink == kInjective)) {
     return DNNFuseRelation::kFuseDepend;
   }
-  if (producer == kCommReduce && (consumer == kBroadcast || consumer == kInjective)) {
+  if (src == kCommReduce && (sink == kBroadcast || sink == kInjective)) {
     return DNNFuseRelation::kFuseDepend;
   }
-  if (producer == kBroadcast && consumer == kInjective) {
+  if (src == kBroadcast && sink == kInjective) {
     return DNNFuseRelation::kFuseDepend;
   }
-  if (producer > kBroadcast && consumer > kBroadcast) {
+  if (src > kBroadcast && sink > kBroadcast) {
     return DNNFuseRelation::kFuseBreak;
   }
   return DNNFuseRelation::kFuseThrough;
