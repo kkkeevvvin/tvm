@@ -882,14 +882,15 @@ bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
   // Time each op standalone and the fused src->sink kernel (any -1.0 = a
   // PrimFunc lookup / build / timing failure), then fuse only if the fused
   // kernel beats the separate sum.
-  double src_us = TimeNode(src, runs);
-  double sink_us = TimeNode(sink, runs);
-  double fused_us = TimeFusedPair(src, sink, runs);
-  if (src_us < 0.0 || sink_us < 0.0 || fused_us < 0.0) return false;
+  double src_latency = TimeNode(src, runs);
+  double sink_latency = TimeNode(sink, runs);
+  double fused_latency = TimeFusedPair(src, sink, runs);
+  if (src_latency < 0.0 || sink_latency < 0.0 || fused_latency < 0.0) return false;
 
-  bool profitable = fused_us < src_us + sink_us;
-  LOG(INFO) << "    profile: fused = " << fused_us << " us vs separate " << (src_us + sink_us)
-            << " us (avg cuda over " << runs << " runs) -> " << (profitable ? "fuse" : "skip");
+  bool profitable = fused_latency < src_latency + sink_latency;
+  LOG(INFO) << "    profile: fused = " << fused_latency << " us vs separate "
+            << (src_latency + sink_latency) << " us (avg cuda over " << runs << " runs) -> "
+            << (profitable ? "fuse" : "skip");
   return profitable;
 }
 
