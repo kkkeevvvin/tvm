@@ -691,22 +691,14 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
   }
 }
 
-// Build `func` on the GTX 1070 (via BuildPrimFuncGPU), run it kProfileRuns times
-// on random device inputs, and return the average wall-clock latency in
-// microseconds (-1 if the build fails). CUDA launches are async, so each timed
-// run ends with a device StreamSync before the clock stops.
-double TimePrimFuncCUDA(const tir::PrimFunc& func) {
-  Target target("nvidia/geforce-gtx-1070");
-  DLDevice cuda_dev = {kDLCUDA, 0};
-  DLDevice cpu_dev = {kDLCPU, 0};
-
-  ffi::Optional<ffi::Function> opt_kernel = BuildPrimFuncGPU(func, target);
-  if (!opt_kernel) return -1.0;
-  ffi::Function kernel = opt_kernel.value();
-
-  // One device tensor per buffer param (inputs + outputs, in param order); fill
-  // float32 buffers with random values in [-1, 1] on the host, then copy to GPU
-  // (kernels can't be fed host pointers, and we can't write GPU memory directly).
+// Materialize one device tensor per buffer param of `func` (inputs + outputs, in
+// param order): allocate on `cpu_dev`, random-fill float32 buffers with values in
+// [-1, 1], then copy to `cuda_dev` (kernels can't be fed host pointers, and we
+// can't write GPU memory directly). nullopt if any param is not a buffer or has a
+// dynamic shape.
+ffi::Optional<std::vector<runtime::Tensor>> MakeRandomDeviceArgs(const tir::PrimFunc& func,
+                                                                 DLDevice cuda_dev,
+                                                                 DLDevice cpu_dev) {
   std::mt19937 rng(0);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
   std::vector<runtime::Tensor> args;
@@ -714,7 +706,7 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
     ffi::Optional<tir::Buffer> opt_buf = func->buffer_map.Get(param);
     if (!opt_buf) {
       LOG(INFO) << "  param " << param << " is not a buffer; skip profiling";
-      return -1.0;
+      return std::nullopt;
     }
     tir::Buffer buf = opt_buf.value();
     std::vector<int64_t> shape;
@@ -722,7 +714,7 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
       const auto* imm = dim.as<IntImmNode>();
       if (imm == nullptr) {
         LOG(INFO) << "  param " << param << " has a dynamic shape; skip profiling";
-        return -1.0;
+        return std::nullopt;
       }
       shape.push_back(imm->value);
     }
@@ -735,23 +727,29 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
     }
     args.push_back(host_t.CopyTo(cuda_dev));  // CopyTo triggers a TVMSynchronize
   }
+  return args;
+}
 
+// Run `kernel` on `args` once untimed (warmup, to absorb cold-cache / first-
+// dispatch PTX-JIT cost) then kProfileRuns times, and return the mean wall-clock
+// latency in microseconds. CUDA launches are async, so each timed run ends with a
+// device StreamSync before the clock stops.
+double TimeKernel(const ffi::Function& kernel, const std::vector<runtime::Tensor>& args,
+                  DLDevice cuda_dev) {
   // Pack args once (AnyView is non-owning, so `args` must outlive the calls).
   std::vector<ffi::AnyView> packed(args.size());
   for (size_t i = 0; i < args.size(); ++i) packed[i] = args[i];
 
   runtime::DeviceAPI* dev_api = runtime::DeviceAPI::Get(cuda_dev);
 
-  // Warmup (untimed): absorb cold-cache / first-dispatch (PTX JIT) cost so the
-  // timed runs measure steady-state latency.
   {
     ffi::Any ret;
     kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
     dev_api->StreamSync(cuda_dev, nullptr);
   }
 
-  // Time kProfileRuns invocations; sync after each launch so the clock captures
-  // device execution rather than just the async dispatch.
+  // Sync after each launch so the clock captures device execution rather than
+  // just the async dispatch.
   double total_us = 0.0;
   for (int r = 0; r < kProfileRuns; ++r) {
     ffi::Any ret;
@@ -762,6 +760,21 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
     total_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
   }
   return total_us / kProfileRuns;
+}
+
+// Build `func` on the GTX 1070 (BuildPrimFuncGPU), feed it random device inputs
+// (MakeRandomDeviceArgs), and time it (TimeKernel); -1 if the build fails or any
+// param cannot be materialized.
+double TimePrimFuncCUDA(const tir::PrimFunc& func) {
+  Target target("nvidia/geforce-gtx-1070");
+  DLDevice cuda_dev = {kDLCUDA, 0};
+  DLDevice cpu_dev = {kDLCPU, 0};
+
+  ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target);
+  if (!kernel) return -1.0;
+  ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, cuda_dev, cpu_dev);
+  if (!args) return -1.0;
+  return TimeKernel(kernel.value(), args.value(), cuda_dev);
 }
 
 // Find the call_tir Call bound to `var` in any relax function of `mod`.
