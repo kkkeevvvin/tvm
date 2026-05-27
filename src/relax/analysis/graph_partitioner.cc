@@ -664,21 +664,13 @@ namespace {
 // many timed device runs (after one untimed warmup).
 constexpr int kProfileRuns = 100;
 
-// GPU-schedule `func` (DefaultGPUSchedule), build it on the GTX 1070 CUDA
-// target, run it kProfileRuns times on random device inputs, and return the average
-// wall-clock latency in microseconds (-1 if the build fails). An unscheduled
-// PrimFunc has no thread bindings, so DefaultGPUSchedule must run before
-// tir.build; CUDA launches are async, so each timed run ends with a device
-// StreamSync before the clock stops.
-double TimePrimFuncCUDA(const tir::PrimFunc& func) {
-  Target target("nvidia/geforce-gtx-1070");
-  DLDevice cuda_dev = {kDLCUDA, 0};
-  DLDevice cpu_dev = {kDLCPU, 0};
-
-  ffi::Function kernel;
+// GPU-schedule `func` (DefaultGPUSchedule) and build it on `target`, returning
+// the callable device kernel; nullopt if scheduling or build fails. An
+// unscheduled PrimFunc has no thread bindings, so DefaultGPUSchedule must run
+// before tir.build. DefaultGPUSchedule reads Target::Current(), so build stays
+// under the same target scope that drives the host/device split.
+ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const Target& target) {
   try {
-    // DefaultGPUSchedule reads Target::Current(); keep build under the same
-    // scope so the func is bound to the CUDA target during host/device split.
     tvm::With<Target> target_scope(target);
     tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, ffi::String("tir_function"));
     // DefaultGPUSchedule is a module pass; wrap, schedule, then build the
@@ -692,11 +684,25 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
 
     const auto build = tvm::ffi::Function::GetGlobalRequired("tir.build");
     ffi::Module rt_module = build(scheduled, target).cast<ffi::Module>();
-    kernel = rt_module->GetFunction("tir_function").value();
+    return rt_module->GetFunction("tir_function").value();
   } catch (const tvm::Error& err) {
     LOG(INFO) << "  build failed: " << err.what();
-    return -1.0;
+    return std::nullopt;
   }
+}
+
+// Build `func` on the GTX 1070 (via BuildPrimFuncGPU), run it kProfileRuns times
+// on random device inputs, and return the average wall-clock latency in
+// microseconds (-1 if the build fails). CUDA launches are async, so each timed
+// run ends with a device StreamSync before the clock stops.
+double TimePrimFuncCUDA(const tir::PrimFunc& func) {
+  Target target("nvidia/geforce-gtx-1070");
+  DLDevice cuda_dev = {kDLCUDA, 0};
+  DLDevice cpu_dev = {kDLCPU, 0};
+
+  ffi::Optional<ffi::Function> opt_kernel = BuildPrimFuncGPU(func, target);
+  if (!opt_kernel) return -1.0;
+  ffi::Function kernel = opt_kernel.value();
 
   // One device tensor per buffer param (inputs + outputs, in param order); fill
   // float32 buffers with random values in [-1, 1] on the host, then copy to GPU
