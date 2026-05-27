@@ -363,11 +363,10 @@ class GraphPartitioner {
   double TimeNodePrimFunc(const IndexedForwardGraph::Node* node, int runs);
   // Profile producer + consumer in isolation and as a fused pair, logging the
   // fused-vs-separate comparison. Returns true iff the fused kernel is faster
-  // than the two run separately (false if anything could not be timed). Shared
-  // by RunTestProfile and FuseSuccessor.
+  // than the two run separately (false if anything could not be timed). Used by
+  // FuseSuccessor / FusePredecessor to gate the ambiguous kFuseDepend case.
   bool FuseProfit(IndexedForwardGraph::Node* producer, IndexedForwardGraph::Node* consumer,
                   int runs);
-  void RunTestProfile(const IndexedForwardGraph& graph);
 };
 
 }  // namespace relax

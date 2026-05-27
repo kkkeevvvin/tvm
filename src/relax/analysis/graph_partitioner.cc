@@ -178,10 +178,6 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
     this->RunDNNFuse(graph);
     return std::move(groups_);
   }
-  if (opt_level_ == 7) {
-    this->RunTestProfile(graph);
-    return std::move(groups_);
-  }
   // get post dominator tree
   auto post_dom_tree = DominatorTree::PostDom(arena_, graph);
   // run fusion algorithm.
@@ -898,34 +894,6 @@ bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* producer,
   LOG(INFO) << "    profile: fused = " << fused_us << " us vs separate " << (prod_us + cons_us)
             << " us (avg cuda over " << runs << " runs) -> " << (profitable ? "fuse" : "skip");
   return profitable;
-}
-
-void GraphPartitioner::RunTestProfile(const IndexedForwardGraph& graph) {
-  LOG(INFO) << "\nTest profile\n";
-
-  auto log_node = [](const char* label, const IndexedForwardGraph::Node* node) {
-    LOG(INFO) << label << ": node[" << node->index << "] " << ffi::GetRef<ObjectRef>(node->ref)
-              << " (pattern=" << node->pattern << ", bytes=" << node->output_size << ")";
-  };
-
-  std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
-      graph.post_dfs_order.begin(), graph.post_dfs_order.end());
-  IndexedForwardGraph::Node* seed = FindMinElemWise(unfused_ops);
-  if (seed == nullptr) {
-    LOG(INFO) << "no kElemWise seed found";
-    return;
-  }
-  log_node("seed", seed);
-
-  // First successor = head of the seed's forward-edge list.
-  if (seed->outputs.head == nullptr) {
-    LOG(INFO) << "seed has no successor";
-    return;
-  }
-  IndexedForwardGraph::Node* successor = seed->outputs.head->value.node;
-  log_node("first successor", successor);
-
-  FuseProfit(seed, successor, /*runs=*/50);
 }
 
 }  // namespace relax
