@@ -917,7 +917,14 @@ bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
   double src_latency = TimeNode(src);
   double sink_latency = TimeNode(sink);
   double fused_latency = TimeFusedPair(src, sink);
-  if (src_latency < 0.0 || sink_latency < 0.0 || fused_latency < 0.0) return false;
+  if (src_latency < 0.0 || sink_latency < 0.0 || fused_latency < 0.0) {
+    LOG(INFO) << "    profile: failed to time "
+              << (src_latency < 0.0 ? "src " : "")
+              << (sink_latency < 0.0 ? "sink " : "")
+              << (fused_latency < 0.0 ? "fused_pair " : "")
+              << "- skip";
+    return false;
+  }
 
   bool profitable = fused_latency < src_latency + sink_latency;
   LOG(INFO) << "    profile: fused = " << fused_latency << " us vs separate "
