@@ -236,11 +236,12 @@ bool GraphPartitioner::CheckPath(IndexedForwardGraph::Node* src, IndexedForwardG
 }
 
 OpPatternKind CombinePattern(OpPatternKind lhs, OpPatternKind rhs) {
-  if (lhs > kBroadcast && rhs > kBroadcast) {
-    LOG(FATAL) << "Cannot merge two complex group together";
-  }
-  if (lhs > rhs) return lhs;
-  return rhs;
+  // TVM normally aborts here when both groups are complex (> kBroadcast). The
+  // DNNFuse profit oracle (FuseSuccessor's kFuseDepend branch) deliberately
+  // commits such merges, so take the more complex pattern instead of fataling.
+  // NOTE: the resulting group is not guaranteed to be handled by FuseTIR /
+  // codegen; this is the scoped-out DNNFusion complex-fusion territory.
+  return lhs > rhs ? lhs : rhs;
 }
 
 void GraphPartitioner::MergeFromTo(Group* child, Group* parent) {
@@ -559,7 +560,13 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
     LOG(INFO) << "    CheckPath: false - Skip CommitFuse";
     return;
   }
-  if (relation == DNNFuseRelation::kFuseDepend) return;
+  // For the ambiguous kFuseDepend case, fuse only if profiling says the fused
+  // kernel beats running the two ops separately. kFuseThrough short-circuits
+  // past the profiler and fuses unconditionally.
+  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(sp, successor, /*runs=*/50)) {
+    LOG(INFO) << "    kFuseDepend: not profitable - Skip CommitFuse";
+    return;
+  }
   LOG(INFO) << "    CheckPath: true - CommitFuse";
   CommitFuse(sp, successor);
   block->insert(successor);
@@ -592,7 +599,13 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
     LOG(INFO) << "    CheckPath: false - Skip";
     return;
   }
-  if (relation == DNNFuseRelation::kFuseDepend) return;
+  // For the ambiguous kFuseDepend case, fuse only if profiling says the fused
+  // kernel beats running the two ops separately. kFuseThrough short-circuits
+  // past the profiler and fuses unconditionally.
+  if (relation == DNNFuseRelation::kFuseDepend && !FuseProfit(predecessor, sp, /*runs=*/50)) {
+    LOG(INFO) << "    kFuseDepend: not profitable - Skip CommitFuse";
+    return;
+  }
   LOG(INFO) << "    CheckPath: true - CommitFuse";
   CommitFuse(predecessor, sp);
   block->insert(predecessor);
