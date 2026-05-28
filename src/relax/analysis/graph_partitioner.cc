@@ -770,6 +770,7 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   DLDevice cuda_dev = {kDLCUDA, 0};
   DLDevice cpu_dev = {kDLCPU, 0};
 
+  LOG(INFO) << "  PrimFunc to build:\n" << func;
   ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target);
   if (!kernel) return -1.0;
   ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, cuda_dev, cpu_dev);
