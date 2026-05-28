@@ -30,13 +30,13 @@
 #include <tvm/relax/transform.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/module.h>
+#include <tvm/runtime/profiling.h>
 #include <tvm/runtime/tensor.h>
 #include <tvm/support/with.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/function.h>
 #include <tvm/tir/transform.h>
 
-#include <chrono>
 #include <random>
 #include <string>
 #include <unordered_set>
@@ -663,6 +663,7 @@ namespace {
 // Sample count for the in-pass cost oracle: TimePrimFuncCUDA averages over this
 // many timed device runs (after one untimed warmup).
 constexpr int kProfileRuns = 100;
+constexpr int kProfileRepeats = 3;
 
 // GPU-schedule `func` (DefaultGPUSchedule) and build it on `target`, returning
 // the callable device kernel; nullopt if scheduling or build fails. An
@@ -741,9 +742,9 @@ ffi::Optional<std::vector<runtime::Tensor>> MakeRandomDeviceArgs(const tir::Prim
 }
 
 // Run `kernel` on `args` once untimed (warmup, to absorb cold-cache / first-
-// dispatch PTX-JIT cost) then kProfileRuns times, and return the mean wall-clock
-// latency in microseconds. CUDA launches are async, so each timed run ends with a
-// device StreamSync before the clock stops.
+// dispatch PTX-JIT cost), then time batches of kProfileRuns launches with the
+// device timer. On CUDA this uses cudaEvent elapsed time, avoiding host launch
+// and StreamSync overhead in the cost model.
 double TimeKernel(const ffi::Function& kernel, const std::vector<runtime::Tensor>& args,
                   DLDevice cuda_dev) {
   // Pack args once (AnyView is non-owning, so `args` must outlive the calls).
@@ -758,18 +759,17 @@ double TimeKernel(const ffi::Function& kernel, const std::vector<runtime::Tensor
     dev_api->StreamSync(cuda_dev, nullptr);
   }
 
-  // Sync after each launch so the clock captures device execution rather than
-  // just the async dispatch.
   double total_us = 0.0;
-  for (int r = 0; r < kProfileRuns; ++r) {
-    ffi::Any ret;
-    auto t0 = std::chrono::high_resolution_clock::now();
-    kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
-    dev_api->StreamSync(cuda_dev, nullptr);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    total_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
+  for (int repeat = 0; repeat < kProfileRepeats; ++repeat) {
+    runtime::Timer timer = runtime::Timer::Start(cuda_dev);
+    for (int r = 0; r < kProfileRuns; ++r) {
+      ffi::Any ret;
+      kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
+    }
+    timer->Stop();
+    total_us += static_cast<double>(timer->SyncAndGetElapsedNanos()) / 1000.0 / kProfileRuns;
   }
-  return total_us / kProfileRuns;
+  return total_us / kProfileRepeats;
 }
 
 // Build `func` on the GTX 1070 (BuildPrimFuncGPU), feed it random device inputs
@@ -957,8 +957,8 @@ bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
 
   bool profitable = fused_latency < src_latency + sink_latency;
   LOG(INFO) << "    profile: fused = " << fused_latency << " us vs separate "
-            << (src_latency + sink_latency) << " us (avg cuda over " << kProfileRuns
-            << " runs) -> " << (profitable ? "fuse" : "skip");
+            << (src_latency + sink_latency) << " us (avg cuda-event over " << kProfileRepeats
+            << " x " << kProfileRuns << " runs) -> " << (profitable ? "fuse" : "skip");
   return profitable;
 }
 
