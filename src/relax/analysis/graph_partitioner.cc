@@ -810,43 +810,43 @@ ffi::Optional<Call> FindCallTIR(const IRModule& mod, const Object* var) {
 }
 
 // Construct the inner `fused_pair` relax Function: a kPrimitive 2-op dataflow
-// chaining seed_call -> succ_call, connected on `link_var` (the seed's output).
-// Registers the two callee PrimFuncs (p_seed / p_succ) in `bb` and turns every
+// chaining src_call -> sink_call, connected on `link_var` (the src's output).
+// Registers the two callee PrimFuncs (p_src / p_sink) in `bb` and turns every
 // other external input -- including constants -- into a tensor param, so the
 // kernel is self-contained.
-Function MakeFusedPairFunc(BlockBuilder bb, const IRModule& mod, const Call& seed_call,
-                           const Call& succ_call, const Object* link_var) {
+Function MakeFusedPairFunc(BlockBuilder bb, const IRModule& mod, const Call& src_call,
+                           const Call& sink_call, const Object* link_var) {
   static const Op& call_tir_op = Op::Get("relax.call_tir");
-  auto seed_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(seed_call->args[0])));
-  auto succ_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(succ_call->args[0])));
-  GlobalVar seed_gv = bb->AddFunction(seed_pf, "p_seed");
-  GlobalVar succ_gv = bb->AddFunction(succ_pf, "p_succ");
+  auto src_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(src_call->args[0])));
+  auto sink_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(sink_call->args[0])));
+  GlobalVar src_gv = bb->AddFunction(src_pf, "p_src");
+  GlobalVar sink_gv = bb->AddFunction(sink_pf, "p_sink");
 
   ffi::Array<Var> params;
   int pidx = 0;
-  ffi::Array<Expr> seed_args;
-  for (const Expr& a : Downcast<Tuple>(seed_call->args[1])->fields) {
+  ffi::Array<Expr> src_args;
+  for (const Expr& a : Downcast<Tuple>(src_call->args[1])->fields) {
     Var param("p" + std::to_string(pidx++), GetStructInfo(a));
     params.push_back(param);
-    seed_args.push_back(param);
+    src_args.push_back(param);
   }
-  Call seed_inner(call_tir_op, {seed_gv, Tuple(seed_args)}, Attrs(), seed_call->sinfo_args);
+  Call src_inner(call_tir_op, {src_gv, Tuple(src_args)}, Attrs(), src_call->sinfo_args);
 
   bb->BeginDataflowBlock();
-  Var seed_out = bb->Emit(seed_inner);
+  Var src_out = bb->Emit(src_inner);
 
-  ffi::Array<Expr> succ_args;
-  for (const Expr& a : Downcast<Tuple>(succ_call->args[1])->fields) {
+  ffi::Array<Expr> sink_args;
+  for (const Expr& a : Downcast<Tuple>(sink_call->args[1])->fields) {
     if (a.get() == link_var) {
-      succ_args.push_back(seed_out);  // the only edge: seed output feeds successor
+      sink_args.push_back(src_out);  // the only edge: src output feeds sink
     } else {
       Var param("p" + std::to_string(pidx++), GetStructInfo(a));
       params.push_back(param);
-      succ_args.push_back(param);
+      sink_args.push_back(param);
     }
   }
-  Call succ_inner(call_tir_op, {succ_gv, Tuple(succ_args)}, Attrs(), succ_call->sinfo_args);
-  Var out = bb->EmitOutput(succ_inner);
+  Call sink_inner(call_tir_op, {sink_gv, Tuple(sink_args)}, Attrs(), sink_call->sinfo_args);
+  Var out = bb->EmitOutput(sink_inner);
   BindingBlock blk = bb->EndBlock();
 
   Expr body = bb->Normalize(out);
@@ -899,15 +899,15 @@ ffi::Optional<tir::PrimFunc> FuseTIRAndExtract(BlockBuilder bb, const GlobalVar&
   return std::nullopt;
 }
 
-// Build a 2-op kPrimitive module chaining seed_call -> succ_call (connected on
-// `link_var`, the seed's output), run FuseTIR, and return the merged PrimFunc.
+// Build a 2-op kPrimitive module chaining src_call -> sink_call (connected on
+// `link_var`, the src's output), run FuseTIR, and return the merged PrimFunc.
 // Every external input of either op -- including constant args -- becomes a
 // tensor param, so the merged kernel is self-contained. Handles the simple
 // single-link, single-output case; returns nullopt otherwise.
-ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& seed_call,
-                                            const Call& succ_call, const Object* link_var) {
+ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& src_call,
+                                            const Call& sink_call, const Object* link_var) {
   BlockBuilder bb = BlockBuilder::Create(std::nullopt);
-  Function fused = MakeFusedPairFunc(bb, mod, seed_call, succ_call, link_var);
+  Function fused = MakeFusedPairFunc(bb, mod, src_call, sink_call, link_var);
   GlobalVar fused_gv = bb->AddFunction(fused, "fused_pair");
   AppendMainCaller(bb, fused_gv, fused->params);
   return FuseTIRAndExtract(bb, fused_gv);
