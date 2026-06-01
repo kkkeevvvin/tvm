@@ -37,8 +37,11 @@
 #include <tvm/tir/function.h>
 #include <tvm/tir/transform.h>
 
+#include <algorithm>
 #include <random>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -561,7 +564,7 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // kernel beats running the two ops separately. kFuseThrough short-circuits
   // past the profiler and fuses unconditionally.
   if (relation == DNNFuseRelation::kFuseDepend) {
-    bool profitable = FuseProfit(sp, successor);
+    bool profitable = FuseProfit(*block, successor);
     if (!profitable) {
       LOG(INFO) << "    kFuseDepend: not profitable";
       return;
@@ -605,7 +608,7 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   // kernel beats running the two ops separately. kFuseThrough short-circuits
   // past the profiler and fuses unconditionally.
   if (relation == DNNFuseRelation::kFuseDepend) {
-    bool profitable = FuseProfit(predecessor, sp);
+    bool profitable = FuseProfit(*block, predecessor);
     if (!profitable) {
       LOG(INFO) << "    kFuseDepend: not profitable";
       return;
@@ -819,44 +822,68 @@ ffi::Optional<Call> FindCallTIR(const IRModule& mod, const Object* var) {
   return std::nullopt;
 }
 
-// Construct the inner `fused_pair` relax Function: a kPrimitive 2-op dataflow
-// chaining src_call -> sink_call, connected on `link_var` (the src's output).
-// Registers the two callee PrimFuncs (p_src / p_sink) in `bb` and turns every
-// other external input -- including constants -- into a tensor param, so the
-// kernel is self-contained.
-Function MakeFusedPairFunc(BlockBuilder bb, const IRModule& mod, const Call& src_call,
-                           const Call& sink_call, const Object* link_var) {
+// Construct the inner `fused_block` relax Function over `nodes` (given in
+// producer-before-consumer order, i.e. sorted by IndexedForwardGraph index): a
+// kPrimitive dataflow block chaining every node's call_tir. Each callee PrimFunc
+// is registered in `bb`; an input that is the output of another node in the set
+// is wired var-to-var (the internal edges), while every other input -- including
+// constants -- becomes a tensor param, so the kernel is self-contained. Each
+// node output not consumed inside the set becomes a function output (a single
+// var, or a Tuple if several). Returns nullopt if any node lacks a call_tir
+// binding.
+ffi::Optional<Function> MakeFusedBlockFunc(
+    BlockBuilder bb, const IRModule& mod,
+    const std::vector<const IndexedForwardGraph::Node*>& nodes) {
   static const Op& call_tir_op = Op::Get("relax.call_tir");
-  auto src_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(src_call->args[0])));
-  auto sink_pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(sink_call->args[0])));
-  GlobalVar src_gv = bb->AddFunction(src_pf, "p_src");
-  GlobalVar sink_gv = bb->AddFunction(sink_pf, "p_sink");
+
+  // Resolve every node's call_tir up front so we can bail before mutating `bb`.
+  std::vector<Call> calls;
+  calls.reserve(nodes.size());
+  for (const auto* n : nodes) {
+    ffi::Optional<Call> c = FindCallTIR(mod, n->ref);
+    if (!c) return std::nullopt;
+    calls.push_back(c.value());
+  }
 
   ffi::Array<Var> params;
   int pidx = 0;
-  ffi::Array<Expr> src_args;
-  for (const Expr& a : Downcast<Tuple>(src_call->args[1])->fields) {
-    Var param("p" + std::to_string(pidx++), GetStructInfo(a));
-    params.push_back(param);
-    src_args.push_back(param);
-  }
-  Call src_inner(call_tir_op, {src_gv, Tuple(src_args)}, Attrs(), src_call->sinfo_args);
+  std::unordered_map<const Object*, Var> produced;  // node->ref -> emitted var
+  std::unordered_set<const Object*> consumed;        // outputs used within the set
 
   bb->BeginDataflowBlock();
-  Var src_out = bb->Emit(src_inner);
-
-  ffi::Array<Expr> sink_args;
-  for (const Expr& a : Downcast<Tuple>(sink_call->args[1])->fields) {
-    if (a.get() == link_var) {
-      sink_args.push_back(src_out);  // the only edge: src output feeds sink
-    } else {
-      Var param("p" + std::to_string(pidx++), GetStructInfo(a));
-      params.push_back(param);
-      sink_args.push_back(param);
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    const Call& call = calls[i];
+    auto pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(call->args[0])));
+    GlobalVar callee = bb->AddFunction(pf, "k" + std::to_string(i));
+    ffi::Array<Expr> args;
+    for (const Expr& a : Downcast<Tuple>(call->args[1])->fields) {
+      auto it = produced.find(a.get());
+      if (it != produced.end()) {
+        consumed.insert(a.get());  // internal edge: another node's output feeds this op
+        args.push_back(it->second);
+      } else {
+        Var param("p" + std::to_string(pidx++), GetStructInfo(a));
+        params.push_back(param);
+        args.push_back(param);
+      }
     }
+    Call inner(call_tir_op, {callee, Tuple(args)}, Attrs(), call->sinfo_args);
+    produced[nodes[i]->ref] = bb->Emit(inner);
   }
-  Call sink_inner(call_tir_op, {sink_gv, Tuple(sink_args)}, Attrs(), sink_call->sinfo_args);
-  Var out = bb->EmitOutput(sink_inner);
+
+  // Any node whose output is not consumed by another node in the set escapes.
+  // The highest-index node is never consumed internally, so there is >= 1.
+  ffi::Array<Expr> outs;
+  for (const auto* n : nodes) {
+    if (!consumed.count(n->ref)) outs.push_back(produced[n->ref]);
+  }
+  Expr out_expr;
+  if (outs.size() == 1) {
+    out_expr = outs[0];
+  } else {
+    out_expr = Tuple(outs);
+  }
+  Var out = bb->EmitOutput(out_expr);
   BindingBlock blk = bb->EndBlock();
 
   Expr body = bb->Normalize(out);
@@ -909,17 +936,18 @@ ffi::Optional<tir::PrimFunc> FuseTIRAndExtract(BlockBuilder bb, const GlobalVar&
   return std::nullopt;
 }
 
-// Build a 2-op kPrimitive module chaining src_call -> sink_call (connected on
-// `link_var`, the src's output), run FuseTIR, and return the merged PrimFunc.
-// Every external input of either op -- including constant args -- becomes a
-// tensor param, so the merged kernel is self-contained. Handles the simple
-// single-link, single-output case; returns nullopt otherwise.
-ffi::Optional<tir::PrimFunc> BuildFusedPair(const IRModule& mod, const Call& src_call,
-                                            const Call& sink_call, const Object* link_var) {
+// Build a kPrimitive module fusing all of `nodes` (producer-before-consumer
+// order), run FuseTIR, and return the merged PrimFunc. Internal edges are wired
+// var-to-var; every other input -- including constant args -- becomes a tensor
+// param, so the merged kernel is self-contained. Returns nullopt if any node
+// lacks a call_tir binding or FuseTIR cannot produce a single PrimFunc.
+ffi::Optional<tir::PrimFunc> BuildFusedBlock(
+    const IRModule& mod, const std::vector<const IndexedForwardGraph::Node*>& nodes) {
   BlockBuilder bb = BlockBuilder::Create(std::nullopt);
-  Function fused = MakeFusedPairFunc(bb, mod, src_call, sink_call, link_var);
-  GlobalVar fused_gv = bb->AddFunction(fused, "fused_pair");
-  AppendMainCaller(bb, fused_gv, fused->params);
+  ffi::Optional<Function> fused = MakeFusedBlockFunc(bb, mod, nodes);
+  if (!fused) return std::nullopt;
+  GlobalVar fused_gv = bb->AddFunction(fused.value(), "fused_block");
+  AppendMainCaller(bb, fused_gv, fused.value()->params);
   return FuseTIRAndExtract(bb, fused_gv);
 }
 
@@ -935,44 +963,59 @@ double GraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node) {
       Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))));
 }
 
-double GraphPartitioner::TimeFusedPair(const IndexedForwardGraph::Node* src,
-                                       const IndexedForwardGraph::Node* sink) {
-  // Build the fused src->sink kernel (FuseTIR over a 2-op kPrimitive module,
-  // linked on src's output) and time it; -1.0 if either op lacks a call_tir
-  // binding or the fused PrimFunc cannot be built.
-  ffi::Optional<Call> src_call = FindCallTIR(mod_, src->ref);
-  ffi::Optional<Call> sink_call = FindCallTIR(mod_, sink->ref);
-  if (!src_call || !sink_call) return -1.0;
-  ffi::Optional<tir::PrimFunc> fused =
-      BuildFusedPair(mod_, src_call.value(), sink_call.value(), src->ref);
+double GraphPartitioner::TimeFusedBlock(
+    const std::vector<const IndexedForwardGraph::Node*>& nodes) {
+  // Build the merged kernel fusing every node in `nodes` (FuseTIR over a
+  // kPrimitive module) and time it; -1.0 if any op lacks a call_tir binding or
+  // the fused PrimFunc cannot be built. The block counterpart of TimeNode.
+  ffi::Optional<tir::PrimFunc> fused = BuildFusedBlock(mod_, nodes);
   if (!fused) return -1.0;
-  LOG(INFO) << "  TimeFusedPair: "
-            << (src->gvar ? src->gvar->name_hint : ffi::String("?")) << " -> "
-            << (sink->gvar ? sink->gvar->name_hint : ffi::String("?"));
+  std::ostringstream names;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    names << (i ? " + " : "") << (nodes[i]->gvar ? nodes[i]->gvar->name_hint : ffi::String("?"));
+  }
+  LOG(INFO) << "  TimeFusedBlock: " << names.str();
   return TimePrimFuncCUDA(fused.value());
 }
 
-bool GraphPartitioner::FuseProfit(IndexedForwardGraph::Node* src,
-                                  IndexedForwardGraph::Node* sink) {
-  // Time each op standalone and the fused src->sink kernel (any -1.0 = a
-  // PrimFunc lookup / build / timing failure), then fuse only if the fused
-  // kernel beats the separate sum.
-  double src_latency = TimeNode(src);
-  double sink_latency = TimeNode(sink);
-  double fused_latency = TimeFusedPair(src, sink);
-  if (src_latency < 0.0 || sink_latency < 0.0 || fused_latency < 0.0) {
+bool GraphPartitioner::FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
+                                  IndexedForwardGraph::Node* candidate) {
+  // Group-level profit (DNNFusion §4.3.2): fuse the candidate into the block
+  // only if the whole block merged WITH the candidate beats the block merged
+  // without it plus the candidate run on its own. `block` is the already-fused
+  // group (it excludes `candidate`). Ordering by IndexedForwardGraph index gives
+  // producer-before-consumer for both the block and the block+candidate builds,
+  // regardless of whether the candidate is a successor or a predecessor.
+  auto topo = [](std::vector<const IndexedForwardGraph::Node*> v) {
+    std::sort(v.begin(), v.end(),
+              [](const IndexedForwardGraph::Node* a, const IndexedForwardGraph::Node* b) {
+                return a->index < b->index;
+              });
+    return v;
+  };
+  std::vector<const IndexedForwardGraph::Node*> block_nodes(block.begin(), block.end());
+  std::vector<const IndexedForwardGraph::Node*> full_nodes = block_nodes;
+  full_nodes.push_back(candidate);
+
+  // Time the block alone, the candidate alone, and the block+candidate fused
+  // (any -1.0 = a PrimFunc lookup / build / timing failure).
+  double block_latency = TimeFusedBlock(topo(block_nodes));
+  double cand_latency = TimeNode(candidate);
+  double full_latency = TimeFusedBlock(topo(full_nodes));
+  if (block_latency < 0.0 || cand_latency < 0.0 || full_latency < 0.0) {
     LOG(INFO) << "    profile: failed to time "
-              << (src_latency < 0.0 ? "src " : "")
-              << (sink_latency < 0.0 ? "sink " : "")
-              << (fused_latency < 0.0 ? "fused_pair " : "")
+              << (block_latency < 0.0 ? "block " : "")
+              << (cand_latency < 0.0 ? "candidate " : "")
+              << (full_latency < 0.0 ? "block+candidate " : "")
               << "- skip";
     return false;
   }
 
-  bool profitable = fused_latency < src_latency + sink_latency;
-  LOG(INFO) << "    profile: fused = " << fused_latency << " us vs separate "
-            << (src_latency + sink_latency) << " us (avg cuda-event over " << kProfileRepeats
-            << " x " << kProfileRuns << " runs) -> " << (profitable ? "fuse" : "skip");
+  bool profitable = full_latency < block_latency + cand_latency;
+  LOG(INFO) << "    profile: block+candidate = " << full_latency << " us vs separate "
+            << (block_latency + cand_latency) << " us (block " << block_latency << " + cand "
+            << cand_latency << "; avg cuda-event over " << kProfileRepeats << " x " << kProfileRuns
+            << " runs) -> " << (profitable ? "fuse" : "skip");
   return profitable;
 }
 
