@@ -686,10 +686,8 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
     const auto build = tvm::ffi::Function::GetGlobalRequired("tir.build");
     ffi::Module rt_module = build(scheduled, target).cast<ffi::Module>();
     // tir.build on a GPU target returns a host module that imports the CUDA
-    // device module, so log the top module and its imports (the latter carry
-    // the generated CUDA source).
-    LOG(INFO) << "  rt_module[" << rt_module->kind() << "] source:\n"
-              << rt_module->InspectSource("");
+    // device module, so log the imports (which carry the generated CUDA
+    // source).
     for (const ffi::Any& imp : rt_module->imports()) {
       ffi::Module imported = imp.cast<ffi::Module>();
       LOG(INFO) << "  imported module[" << imported->kind() << "] source:\n"
