@@ -665,23 +665,43 @@ namespace {
 constexpr int kProfileRuns = 100;
 constexpr int kProfileRepeats = 3;
 
-// GPU-schedule `func` (DefaultGPUSchedule) and build it on `target`, returning
-// the callable device kernel; nullopt if scheduling or build fails. An
-// unscheduled PrimFunc has no thread bindings, so DefaultGPUSchedule must run
-// before tir.build. DefaultGPUSchedule reads Target::Current(), so build stays
-// under the same target scope that drives the host/device split.
+// MetaSchedule trials used to schedule each profiled PrimFunc. The cost oracle
+// tunes each kernel briefly (rather than the DefaultGPUSchedule heuristic) so
+// the timed kernel reflects a tuned schedule.
+constexpr int kProfileTuneTrials = 4;
+
+// Schedule `func` and build it on `target`, returning the callable device
+// kernel; nullopt if scheduling or build fails. An unscheduled PrimFunc has no
+// thread bindings, so it must be scheduled before tir.build. Scheduling reads
+// Target::Current(), so build stays under the same target scope that drives the
+// host/device split. The PrimFunc is MetaSchedule-tuned (kProfileTuneTrials
+// trials) via the `relax.dnnf.MetaScheduleSchedulePrimFunc` Python helper, with
+// a DefaultGPUSchedule fallback when MS is unavailable or finds no schedule.
 ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const Target& target) {
   try {
     tvm::With<Target> target_scope(target);
     tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, ffi::String("tir_function"));
-    // DefaultGPUSchedule is a module pass; wrap, schedule, then build the
-    // scheduled PrimFunc (now carrying blockIdx.x / threadIdx.x bindings).
     GlobalVar gv("tir_function");
     ffi::Map<GlobalVar, BaseFunc> funcs;
     funcs.Set(gv, named);
     IRModule m(funcs);
-    m = tir::transform::DefaultGPUSchedule()(m);
-    tir::PrimFunc scheduled = Downcast<tir::PrimFunc>(m->Lookup(gv));
+
+    tir::PrimFunc scheduled;
+    ffi::Optional<tir::PrimFunc> tuned;
+    if (auto ms_schedule =
+            ffi::Function::GetGlobal("relax.dnnf.MetaScheduleSchedulePrimFunc")) {
+      ffi::Any ret = (*ms_schedule)(named, target, kProfileTuneTrials);
+      tuned = ret.try_cast<tir::PrimFunc>();
+    }
+    if (tuned) {
+      scheduled = tuned.value();
+    } else {
+      // No tuned schedule (MS not imported, or no valid record in the trial
+      // budget): fall back to the DefaultGPUSchedule heuristic.
+      LOG(INFO) << "  MetaSchedule unavailable/empty; DefaultGPUSchedule fallback";
+      m = tir::transform::DefaultGPUSchedule()(m);
+      scheduled = Downcast<tir::PrimFunc>(m->Lookup(gv));
+    }
 
     const auto build = tvm::ffi::Function::GetGlobalRequired("tir.build");
     ffi::Module rt_module = build(scheduled, target).cast<ffi::Module>();
