@@ -918,6 +918,7 @@ double GraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node) {
     LOG(INFO) << "  node has no PrimFunc; skip profiling";
     return -1.0;
   }
+  LOG(INFO) << "  TimeNode: " << node->gvar->name_hint;
   return TimePrimFuncCUDA(
       Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))));
 }
@@ -933,6 +934,9 @@ double GraphPartitioner::TimeFusedPair(const IndexedForwardGraph::Node* src,
   ffi::Optional<tir::PrimFunc> fused =
       BuildFusedPair(mod_, src_call.value(), sink_call.value(), src->ref);
   if (!fused) return -1.0;
+  LOG(INFO) << "  TimeFusedPair: "
+            << (src->gvar ? src->gvar->name_hint : ffi::String("?")) << " -> "
+            << (sink->gvar ? sink->gvar->name_hint : ffi::String("?"));
   return TimePrimFuncCUDA(fused.value());
 }
 
