@@ -269,3 +269,57 @@ def compile_tir(
     if not isinstance(target, Target):
         target = Target(target)
     return database.query_schedule(mod, target, workload_name="main")
+
+
+@register_global_func("relax.dnnf.MetaScheduleSchedulePrimFunc")
+def _ms_schedule_primfunc(
+    func: tir.PrimFunc,
+    target: Union[str, Target],
+    max_trials: int,
+) -> Optional[tir.PrimFunc]:
+    """Tune a single PrimFunc with MetaSchedule and return the tuned PrimFunc.
+
+    Called from the in-pass cost oracle (``BuildPrimFuncGPU`` in
+    ``graph_partitioner.cc``) as a replacement for ``DefaultGPUSchedule``: tune
+    ``func`` for ``max_trials`` trials, then apply the best record. Returns
+    ``None`` (so C++ can fall back to ``DefaultGPUSchedule``) if no valid
+    schedule is found within the budget.
+
+    The tuning database is persisted to a stable work directory so it survives
+    the run and can be inspected / reused: ``$DNNF_MS_WORKDIR`` (default
+    ``./dnnf_ms_workdir``), with a per-kernel subdirectory keyed by the
+    PrimFunc's structural hash so structurally-identical kernels share a
+    database.
+
+    Parameters
+    ----------
+    func : tir.PrimFunc
+        The PrimFunc to tune.
+    target : Union[str, Target]
+        The target to tune for.
+    max_trials : int
+        The MetaSchedule trial budget.
+
+    Returns
+    -------
+    tuned : Optional[tir.PrimFunc]
+        The tuned PrimFunc, or ``None`` if tuning found no schedule.
+    """
+    import os  # pylint: disable=import-outside-toplevel
+
+    if isinstance(max_trials, IntImm):
+        max_trials = int(max_trials)
+    base_dir = os.environ.get("DNNF_MS_WORKDIR", os.path.join(os.getcwd(), "dnnf_ms_workdir"))
+    work_dir = os.path.join(base_dir, str(ir.structural_hash(func)))
+    os.makedirs(work_dir, exist_ok=True)
+    database = tune_tir(
+        func,
+        target,
+        work_dir,
+        max_trials_global=max_trials,
+        num_trials_per_iter=max_trials,
+    )
+    sch = compile_tir(database, func, target)
+    if sch is None:
+        return None
+    return sch.mod["main"]
