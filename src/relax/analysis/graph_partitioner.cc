@@ -673,6 +673,11 @@ constexpr int kProfileRepeats = 3;
 // the timed kernel reflects a tuned schedule.
 constexpr int kProfileTuneTrials = 4;
 
+// When false, skip MetaSchedule tuning entirely and schedule every profiled
+// kernel with the DefaultGPUSchedule heuristic (used for fast smoke tests). Set
+// true to tune each profiled kernel with kProfileTuneTrials MS trials.
+constexpr bool kUseMetaSchedule = true;
+
 // Schedule `func` and build it on `target`, returning the callable device
 // kernel; nullopt if scheduling or build fails. An unscheduled PrimFunc has no
 // thread bindings, so it must be scheduled before tir.build. Scheduling reads
@@ -691,17 +696,19 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
 
     tir::PrimFunc scheduled;
     ffi::Optional<tir::PrimFunc> tuned;
-    if (auto ms_schedule =
-            ffi::Function::GetGlobal("relax.dnnf.MetaScheduleSchedulePrimFunc")) {
-      ffi::Any ret = (*ms_schedule)(named, target, kProfileTuneTrials);
-      tuned = ret.try_cast<tir::PrimFunc>();
+    if (kUseMetaSchedule) {
+      if (auto ms_schedule =
+              ffi::Function::GetGlobal("relax.dnnf.MetaScheduleSchedulePrimFunc")) {
+        ffi::Any ret = (*ms_schedule)(named, target, kProfileTuneTrials);
+        tuned = ret.try_cast<tir::PrimFunc>();
+      }
     }
     if (tuned) {
       scheduled = tuned.value();
     } else {
-      // No tuned schedule (MS not imported, or no valid record in the trial
-      // budget): fall back to the DefaultGPUSchedule heuristic.
-      LOG(INFO) << "  MetaSchedule unavailable/empty; DefaultGPUSchedule fallback";
+      // No tuned schedule (MS disabled for smoke test, MS not imported, or no
+      // valid record in the trial budget): fall back to DefaultGPUSchedule.
+      LOG(INFO) << "  MetaSchedule disabled/unavailable; DefaultGPUSchedule fallback";
       m = tir::transform::DefaultGPUSchedule()(m);
       scheduled = Downcast<tir::PrimFunc>(m->Lookup(gv));
     }
