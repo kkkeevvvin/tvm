@@ -314,13 +314,20 @@ ffi::Optional<tir::PrimFunc> FuseTIRAndExtract(BlockBuilder bb, const GlobalVar&
 
 }  // namespace
 
-// Build `func` on the GTX 1070 (BuildPrimFuncGPU) once, then time it
-// (TimeKernel) on kProfileInputs distinct random input sets (MakeRandomDeviceArgs,
-// one seed per set) and return the average latency; -1 if the build fails or any
-// param cannot be materialized.
+// Build `func` (BuildPrimFuncGPU) once, then time it (TimeKernel) on
+// kProfileInputs distinct random input sets (MakeRandomDeviceArgs, one seed per
+// set) and return the average latency; -1 if the build fails or any param cannot
+// be materialized. The build target (and hence the profiled device) is taken from
+// the enclosing `with target:` scope (Target::Current), so the driver must wrap
+// its FuseOps call in `with TARGET:`; ICHECK-fails if no target is in scope.
 double TimePrimFuncCUDA(const tir::PrimFunc& func) {
-  Target target("nvidia/geforce-gtx-1070");
-  DLDevice cuda_dev = {kDLCUDA, 0};
+  Target target = Target::Current(/*allow_not_defined=*/true);
+  ICHECK(target.defined())
+      << "TimePrimFuncCUDA requires a target in the current context: wrap the "
+         "FuseOps call in `with target:` so Target::Current() is set.";
+  // Device follows the build target (kDLCUDA for the GTX 1070), matching TVM's
+  // own Target->Device convention (src/target/target.cc); host staging stays CPU.
+  DLDevice dev = {static_cast<DLDeviceType>(target->GetTargetDeviceType()), 0};
   DLDevice cpu_dev = {kDLCPU, 0};
 
   LOG(INFO) << "  PrimFunc to build:\n" << func;
@@ -330,9 +337,9 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   double total_us = 0.0;
   for (uint32_t seed = 0; seed < kProfileInputs; ++seed) {
     ffi::Optional<std::vector<runtime::Tensor>> args =
-        MakeRandomDeviceArgs(func, cuda_dev, cpu_dev, seed);
+        MakeRandomDeviceArgs(func, dev, cpu_dev, seed);
     if (!args) return -1.0;
-    total_us += TimeKernel(kernel.value(), args.value(), cuda_dev);
+    total_us += TimeKernel(kernel.value(), args.value(), dev);
   }
   return total_us / kProfileInputs;
 }
