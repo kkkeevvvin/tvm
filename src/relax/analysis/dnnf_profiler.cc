@@ -109,13 +109,13 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
 
 // Materialize one device tensor per buffer param of `func` (inputs + outputs, in
 // param order): allocate on `cpu_dev`, random-fill float32 buffers with values in
-// [-1, 1], then copy to `cuda_dev` (kernels can't be fed host pointers, and we
-// can't write GPU memory directly). nullopt if any param is not a buffer or has a
-// dynamic shape.
+// [-1, 1] (seeded by `seed` so callers can draw distinct input sets), then copy to
+// `cuda_dev` (kernels can't be fed host pointers, and we can't write GPU memory
+// directly). nullopt if any param is not a buffer or has a dynamic shape.
 ffi::Optional<std::vector<runtime::Tensor>> MakeRandomDeviceArgs(const tir::PrimFunc& func,
                                                                  DLDevice cuda_dev,
-                                                                 DLDevice cpu_dev) {
-  std::mt19937 rng(0);
+                                                                 DLDevice cpu_dev, uint32_t seed) {
+  std::mt19937 rng(seed);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
   std::vector<runtime::Tensor> args;
   for (const tir::Var& param : func->params) {
@@ -314,8 +314,9 @@ ffi::Optional<tir::PrimFunc> FuseTIRAndExtract(BlockBuilder bb, const GlobalVar&
 
 }  // namespace
 
-// Build `func` on the GTX 1070 (BuildPrimFuncGPU), feed it random device inputs
-// (MakeRandomDeviceArgs), and time it (TimeKernel); -1 if the build fails or any
+// Build `func` on the GTX 1070 (BuildPrimFuncGPU) once, then time it
+// (TimeKernel) on kProfileInputs distinct random input sets (MakeRandomDeviceArgs,
+// one seed per set) and return the average latency; -1 if the build fails or any
 // param cannot be materialized.
 double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   Target target("nvidia/geforce-gtx-1070");
@@ -325,9 +326,15 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   LOG(INFO) << "  PrimFunc to build:\n" << func;
   ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target);
   if (!kernel) return -1.0;
-  ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, cuda_dev, cpu_dev);
-  if (!args) return -1.0;
-  return TimeKernel(kernel.value(), args.value(), cuda_dev);
+
+  double total_us = 0.0;
+  for (uint32_t seed = 0; seed < kProfileInputs; ++seed) {
+    ffi::Optional<std::vector<runtime::Tensor>> args =
+        MakeRandomDeviceArgs(func, cuda_dev, cpu_dev, seed);
+    if (!args) return -1.0;
+    total_us += TimeKernel(kernel.value(), args.value(), cuda_dev);
+  }
+  return total_us / kProfileInputs;
 }
 
 // Build a kPrimitive module fusing all of `nodes` (producer-before-consumer

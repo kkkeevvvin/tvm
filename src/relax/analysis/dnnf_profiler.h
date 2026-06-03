@@ -38,9 +38,11 @@ namespace tvm {
 namespace relax {
 
 // Sample counts for the in-pass cost oracle: TimePrimFuncCUDA averages over
-// kProfileRuns timed device runs (after one untimed warmup), repeated
-// kProfileRepeats times. Exposed so callers can report them alongside results.
-constexpr int kProfileRuns = 100;
+// kProfileInputs distinct random input sets, each timed over kProfileRuns device
+// runs (after one untimed warmup), repeated kProfileRepeats times. Exposed so
+// callers can report them alongside results.
+constexpr int kProfileInputs = 5;
+constexpr int kProfileRuns = 20;
 constexpr int kProfileRepeats = 3;
 
 /*!
