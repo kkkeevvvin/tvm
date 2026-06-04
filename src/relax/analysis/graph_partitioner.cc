@@ -27,6 +27,35 @@ namespace tvm {
 namespace relax {
 
 namespace {
+enum class DNNFuseRelation {
+  kFuseThrough,
+  kFuseBreak,
+  kFuseDepend,
+};
+
+const char* DNNFuseRelationName(DNNFuseRelation relation) {
+  switch (relation) {
+    case DNNFuseRelation::kFuseThrough:
+      return "fuse_through";
+    case DNNFuseRelation::kFuseBreak:
+      return "fuse_break";
+    case DNNFuseRelation::kFuseDepend:
+      return "fuse_depend";
+  }
+  return "unknown";
+}
+
+DNNFuseRelation ClassifyDNNFuseRelation(OpPatternKind src, OpPatternKind sink) {
+  if ((src == kElemWise  || sink == kElemWise ) ||
+      (src == kInjective && sink == kInjective) ){
+    return DNNFuseRelation::kFuseThrough;
+  }
+  if ((src == kBroadcast || src >= kCommReduce) && (sink >= kCommReduce)) {
+    return DNNFuseRelation::kFuseBreak;
+  }
+  return DNNFuseRelation::kFuseDepend;
+}
+
 IndexedForwardGraph::Node* FindMinElemWise(
     const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
@@ -488,10 +517,12 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
-  bool bad_relation = sp_pat > kBroadcast && succ_pat > kBroadcast;
-  LOG(INFO) << "    bad_relation = " << (bad_relation ? "true" : "false");
+  DNNFuseRelation relation = ClassifyDNNFuseRelation(sp_pat, succ_pat);
+  LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
   // return if successor can not be fused
-  if (bad_relation) return;
+  if (relation == DNNFuseRelation::kFuseBreak) return;
+  // Temporarily reject ambiguous relations until the profitability oracle lands.
+  if (relation == DNNFuseRelation::kFuseDepend) return;
   // check the constraint requirement
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
@@ -516,10 +547,12 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
-  bool bad_relation = sp_pat > kBroadcast && pred_pat > kBroadcast;
-  LOG(INFO) << "    bad_relation = " << (bad_relation ? "true" : "false");
+  DNNFuseRelation relation = ClassifyDNNFuseRelation(pred_pat, sp_pat);
+  LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
   // return if predecessor can not be fused
-  if (bad_relation) return;
+  if (relation == DNNFuseRelation::kFuseBreak) return;
+  // Temporarily reject ambiguous relations until the profitability oracle lands.
+  if (relation == DNNFuseRelation::kFuseDepend) return;
   // check the constraint requirement
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
