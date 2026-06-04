@@ -26,6 +26,8 @@
 #if defined(__linux__)
 #include <sys/stat.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/support/with.h>
+#include <tvm/target/target.h>
 #endif
 #include <cuda_runtime.h>
 
@@ -87,18 +89,20 @@ ffi::Module BuildCUDA(IRModule mod, Target target) {
       << "for CUDA compilation. The C++ NVRTC fallback has been removed.\n"
       << "Make sure to import tvm.contrib.nvcc in your Python code.";
 
-  // Enter target scope for compilation
-  auto f_enter = ffi::Function::GetGlobal("target.TargetEnterScope");
-  (*f_enter)(target);
-
-  // Compile CUDA code via Python callback
-  compiled = (*f_compile)(code, target).cast<std::string>();
+  // Compile CUDA code via the Python callback under an active target scope (the
+  // callback reads Target::Current() for arch/codegen flags). Use a RAII
+  // With<Target> rather than a manual TargetEnterScope/TargetExitScope pair:
+  // f_compile can throw (e.g. a ptxas "uses too much shared data" error for an
+  // over-tiled kernel), and a manual exit after the call would be skipped on
+  // that throw, leaking the scope onto the thread-local target stack and
+  // corrupting every later ExitWithScope.
+  {
+    With<Target> compile_scope(target);
+    compiled = (*f_compile)(code, target).cast<std::string>();
+  }
   // Dirty matching to check PTX vs cubin.
   // TODO(tqchen) more reliable checks
   if (compiled[0] != '/') fmt = "cubin";
-  // Exit target scope
-  auto f_exit = ffi::Function::GetGlobal("target.TargetExitScope");
-  (*f_exit)(target);
 
   return CUDAModuleCreate(compiled, fmt, ExtractFuncInfo(mod), code);
 }
