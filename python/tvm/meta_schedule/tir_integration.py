@@ -323,3 +323,124 @@ def _ms_schedule_primfunc(
     if sch is None:
         return None
     return sch.mod["main"]
+
+
+def _dlight_has_thread_binding(func: tir.PrimFunc) -> bool:
+    """True iff some For loop in `func` carries a GPU thread binding -- i.e. the
+    func is really GPU-scheduled, not just claimed by a rule that returned it
+    untouched. dlight rules sometimes "claim" a PrimFunc (return a length-1
+    space) without binding any loop; committing such a func and marking it
+    is_scheduled would hide it from the DefaultGPUSchedule net and then trip
+    VerifyMemory ("directly accessed by host memory") at codegen."""
+    found = [False]
+    tir.stmt_functor.post_order_visit(
+        func.body,
+        lambda s: found.__setitem__(
+            0, found[0] or (isinstance(s, tir.For) and s.thread_binding is not None)
+        ),
+    )
+    return found[0]
+
+
+@register_global_func("relax.dnnf.DlightSchedulePrimFunc")
+def _dlight_schedule_primfunc(
+    func: tir.PrimFunc,
+    target: Union[str, Target],
+) -> tir.PrimFunc:
+    """Schedule a single PrimFunc with dlight's GPU rules, DefaultGPUSchedule net.
+
+    Called from the in-pass cost oracle (``BuildPrimFuncGPU`` in
+    ``dnnf_profiler.cc``) as the ``kDlight`` scheduling mode: a deterministic
+    middle ground between ``DefaultGPUSchedule`` (cheap heuristic) and
+    MetaSchedule (tuned but slow). Returns a *fully* scheduled PrimFunc -- dlight
+    where a GPU rule genuinely thread-binds it, DefaultGPUSchedule otherwise --
+    so the caller never has to schedule it again.
+
+    This mirrors ``expr/dlight_compile.py``'s proven ``_apply_dlight`` recipe:
+
+    1. Try the dlight GPU rules (Matmul / GEMV / Reduction / GeneralReduction /
+       Transpose / Fallback) on the func. A rule that *raises* (e.g. GEMV's
+       normalize asserts on conv PrimFuncs) is skipped; a rule that "claims" the
+       func but produces no thread binding (``_dlight_has_thread_binding``) is
+       rejected -- only a genuinely thread-bound schedule is accepted, then
+       marked ``tir.is_scheduled``.
+    2. Run ``DefaultGPUSchedule`` over the module. It skips the already-scheduled
+       func and binds whatever dlight could not -- the same catch-all the
+       TVM/MLC pipeline uses for conv-heavy (non-LLM) models. This keeps conv
+       PrimFuncs (which no dlight rule binds well, and which an aggressive
+       matmul-style tiling would over-allocate past the device shared-memory
+       limit -> ptxas failure) on the safe DefaultGPUSchedule path.
+
+    Drives dlight's ``ScheduleRule`` objects directly rather than the
+    ``dlight.ApplyDefaultSchedule`` module pass, whose FFI ``__init__`` (sets
+    ``_inst``) is shadowed by the apache-tvm-ffi PyPI wheel here -- the same
+    shadowing CLAUDE.md documents for ``BlockBuilder`` / MetaSchedule's
+    ``TVMDerivedObject``. The ``ScheduleRule`` objects and their ``apply``
+    methods are plain Python and are unaffected.
+
+    Parameters
+    ----------
+    func : tir.PrimFunc
+        The PrimFunc to schedule (carries global_symbol "tir_function" and the
+        kTarget attr set by BuildPrimFuncGPU).
+    target : Union[str, Target]
+        The target to schedule for.
+
+    Returns
+    -------
+    scheduled : tir.PrimFunc
+        The fully scheduled PrimFunc (global_symbol preserved).
+    """
+    # pylint: disable=import-outside-toplevel
+    import tvm
+    from tvm import dlight as dl
+    from tvm.dlight.base.transform import _get_target, _is_scheduled
+
+    if not isinstance(target, Target):
+        target = Target(target)
+    rules = (
+        dl.gpu.Matmul(),
+        dl.gpu.GEMV(),
+        dl.gpu.Reduction(),
+        dl.gpu.GeneralReduction(),
+        dl.gpu.Transpose(),
+        dl.gpu.Fallback(),
+    )
+
+    def _first_bound_schedule(f, tgt):
+        for rule in rules:
+            try:
+                # `tunable` is positional: dlight GPU rules name the 3rd param
+                # `_` and reject it as a keyword (`tunable=False` -> TypeError).
+                space = rule.apply(f, tgt, False)
+            except Exception:  # pylint: disable=broad-except
+                continue  # rule can't handle this func; skip it
+            if space is None:
+                continue
+            # A non-tunable rule returns a bare tir.Schedule or a (ffi.Array, not
+            # list/tuple) sequence of them -- duck-type the length, don't isinstance.
+            if isinstance(space, tir.Schedule):
+                space = [space]
+            try:
+                n = len(space)
+            except TypeError:
+                continue
+            if n == 1:
+                scheduled = space[0].mod["main"]
+                if _dlight_has_thread_binding(scheduled):
+                    return scheduled.with_attr("tir.is_scheduled", True)
+        return None
+
+    # global_symbol stays "tir_function" so the built runtime module exposes the
+    # kernel under the name BuildPrimFuncGPU looks up.
+    gv = ir.GlobalVar("tir_function")
+    mod = ir.IRModule({gv: func})
+    with target:
+        f = mod[gv]
+        if isinstance(f, tir.PrimFunc) and not _is_scheduled(f):
+            sch = _first_bound_schedule(f, _get_target(f))
+            if sch is not None:
+                mod[gv] = sch
+        # DefaultGPUSchedule binds whatever dlight left unscheduled.
+        mod = tvm.tir.transform.DefaultGPUSchedule()(mod)
+    return mod[gv]

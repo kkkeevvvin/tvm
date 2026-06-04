@@ -53,27 +53,47 @@ namespace relax {
 
 namespace {
 
-// MetaSchedule trials used to schedule each profiled PrimFunc. The cost oracle
-// tunes each kernel briefly (rather than the DefaultGPUSchedule heuristic) so
-// the timed kernel reflects a tuned schedule.
+// MetaSchedule trials used to schedule each profiled PrimFunc (kMetaSchedule
+// mode). The cost oracle tunes each kernel briefly so the timed kernel reflects
+// a tuned schedule.
 constexpr int kProfileTuneTrials = 4;
 
-// When false, skip MetaSchedule tuning entirely and schedule every profiled
-// kernel with the DefaultGPUSchedule heuristic (used for fast smoke tests). Set
-// true to tune each profiled kernel with kProfileTuneTrials MS trials.
-constexpr bool kUseMetaSchedule = true;
+// How BuildPrimFuncGPU schedules each profiled kernel before timing it. The
+// three modes trade scheduling cost for kernel quality:
+//   kDefaultGPU    -- DefaultGPUSchedule heuristic only (no Python). Cheapest;
+//                     used for fast smoke tests.
+//   kDlight        -- dlight rule-based scheduling (Matmul/GEMV/Reduction/
+//                     Fallback), no tuning. Deterministic, much faster than MS,
+//                     better kernels than DefaultGPUSchedule. Via the Python
+//                     helper `relax.dnnf.DlightSchedulePrimFunc`.
+//   kMetaSchedule  -- MetaSchedule tuning (kProfileTuneTrials trials) via
+//                     `relax.dnnf.MetaScheduleSchedulePrimFunc`. Best kernels,
+//                     slowest, non-deterministic.
+// Every mode falls back to DefaultGPUSchedule when its Python helper is absent
+// or produces no schedule, so kDefaultGPU is always the floor.
+enum class ScheduleMode { kDefaultGPU, kDlight, kMetaSchedule };
+constexpr ScheduleMode kScheduleMode = ScheduleMode::kDlight;
 
 // Schedule `func` and build it on `target`, returning the callable device
 // kernel; nullopt if scheduling or build fails. An unscheduled PrimFunc has no
-// thread bindings, so it must be scheduled before tir.build. Scheduling reads
-// Target::Current(), so build stays under the same target scope that drives the
-// host/device split. The PrimFunc is MetaSchedule-tuned (kProfileTuneTrials
-// trials) via the `relax.dnnf.MetaScheduleSchedulePrimFunc` Python helper, with
-// a DefaultGPUSchedule fallback when MS is unavailable or finds no schedule.
+// thread bindings, so it must be scheduled before tir.build. The schedule
+// strategy is selected by kScheduleMode (MetaSchedule tuning / dlight rules /
+// DefaultGPUSchedule heuristic); every mode falls back to DefaultGPUSchedule
+// when its Python helper is unavailable or produces no schedule.
+//
+// `target` is threaded explicitly to the schedule helpers and tir.build, and
+// also attached as the PrimFunc's kTarget attr so DefaultGPUSchedule (which
+// otherwise reads Target::Current()) resolves it from the func. We deliberately
+// do NOT open a `With<Target>` scope here: a scheduled-kernel build can throw
+// (e.g. the dtype-legalize "must be called after MakePackedAPI" ICHECK on some
+// FuseTIR-merged blocks), and a scope object on the stack would run its
+// ExitWithScope ICHECK *during* that exception's unwind -- a second exception
+// in flight that std::terminate()s the process. The caller's own target scope
+// (the driver's `with TARGET:` around FuseOps) supplies Target::Current().
 ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const Target& target) {
   try {
-    tvm::With<Target> target_scope(target);
     tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, ffi::String("tir_function"));
+    named = WithAttr(named, tvm::attr::kTarget, target);
     GlobalVar gv("tir_function");
     ffi::Map<GlobalVar, BaseFunc> funcs;
     funcs.Set(gv, named);
@@ -81,19 +101,25 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
 
     tir::PrimFunc scheduled;
     ffi::Optional<tir::PrimFunc> tuned;
-    if (kUseMetaSchedule) {
+    if (kScheduleMode == ScheduleMode::kMetaSchedule) {
       if (auto ms_schedule =
               ffi::Function::GetGlobal("relax.dnnf.MetaScheduleSchedulePrimFunc")) {
         ffi::Any ret = (*ms_schedule)(named, target, kProfileTuneTrials);
+        tuned = ret.try_cast<tir::PrimFunc>();
+      }
+    } else if (kScheduleMode == ScheduleMode::kDlight) {
+      if (auto dl_schedule = ffi::Function::GetGlobal("relax.dnnf.DlightSchedulePrimFunc")) {
+        ffi::Any ret = (*dl_schedule)(named, target);
         tuned = ret.try_cast<tir::PrimFunc>();
       }
     }
     if (tuned) {
       scheduled = tuned.value();
     } else {
-      // No tuned schedule (MS disabled for smoke test, MS not imported, or no
-      // valid record in the trial budget): fall back to DefaultGPUSchedule.
-      LOG(INFO) << "  MetaSchedule disabled/unavailable; DefaultGPUSchedule fallback";
+      // No rule-based / tuned schedule (mode is kDefaultGPU, the Python helper is
+      // not imported, dlight matched no rule, or MS found no valid record in the
+      // trial budget): fall back to the DefaultGPUSchedule heuristic.
+      LOG(INFO) << "  using DefaultGPUSchedule (mode fallback)";
       m = tir::transform::DefaultGPUSchedule()(m);
       scheduled = Downcast<tir::PrimFunc>(m->Lookup(gv));
     }
