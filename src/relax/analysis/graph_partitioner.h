@@ -591,6 +591,10 @@ class GraphPartitioner {
   void FusePredecessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
                        IndexedForwardGraph::Node* predecessor,
                        std::unordered_set<IndexedForwardGraph::Node*>* block);
+  // Prototype hook for the ambiguous kFuseDepend case. Returns false until the
+  // profiling oracle is implemented.
+  bool FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
+                  IndexedForwardGraph::Node* candidate);
 };
 
 }  // namespace relax
