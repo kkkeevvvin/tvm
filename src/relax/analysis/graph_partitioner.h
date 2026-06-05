@@ -373,8 +373,24 @@ class GraphPartitioner {
                      Block* block);
   void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
                        Block* block);
-  // Prototype hook for the ambiguous kFuseDepend case. Returns false until the
-  // profiling oracle is implemented.
+
+  // Log the PrimFunc backing a node, resolved through node->gvar + mod_.
+  void DumpNodePrimFunc(const char* label, const IndexedForwardGraph::Node* node);
+  // GPU-schedule + build a node's PrimFunc on cuda and return the average
+  // wall-clock latency (microseconds) over device executions; -1 on failure.
+  double TimeNode(const IndexedForwardGraph::Node* node);
+  // Build the merged PrimFunc fusing every node in `nodes` (FuseTIR over a
+  // kPrimitive module) and time it on cuda; -1 if any op lacks a call_tir
+  // binding or the fused kernel cannot be built. `nodes` must be in
+  // producer-before-consumer order (sorted by index). The block counterpart of
+  // TimeNode.
+  double TimeFusedBlock(const std::vector<const IndexedForwardGraph::Node*>& nodes);
+  // Profile the already-fused `block` and the `candidate` op, logging the
+  // group-level fused-vs-separate comparison. Returns true iff merging the
+  // candidate into the block (one kernel) is faster than the block kernel plus
+  // the candidate run separately (false if anything could not be timed). `block`
+  // excludes `candidate`. Used by FuseSuccessor / FusePredecessor to gate the
+  // ambiguous kFuseDepend case.
   bool FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate);
 };
 
