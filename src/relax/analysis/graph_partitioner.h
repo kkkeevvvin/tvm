@@ -30,6 +30,7 @@
 #include <tvm/relax/struct_info.h>
 #include <tvm/relax/type.h>
 
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -484,6 +485,20 @@ class GraphPartitioner {
   // execute the fusion algorithm.
   void RunFuse(const IndexedForwardGraph& graph, const DominatorTree& post_dom_tree, int phase);
 
+  // A fusion block: the set of nodes merged so far. Ordered by IFG index
+  // (== post-DFS topological order) so iteration is always producer-before-
+  // consumer, which is what TimeFusedBlock / FuseProfit need. The set dedups
+  // on insert (a diamond in the IFG can reach the same node twice); membership
+  // lookup is never used, so an ordered set fits the access pattern better than
+  // an unordered_set that would have to be copied out and re-sorted per probe.
+  struct NodeByIndex {
+    bool operator()(const IndexedForwardGraph::Node* a,
+                    const IndexedForwardGraph::Node* b) const {
+      return a->index < b->index;
+    }
+  };
+  using Block = std::set<IndexedForwardGraph::Node*, NodeByIndex>;
+
   /*!
    * \brief Execute the DNNFusion-based fusion algorithm.
    *
@@ -549,7 +564,8 @@ class GraphPartitioner {
    * The successor is merged into sp's group based on DNNFuseRelation::Classify of
    * the two groups' root mapping types -- the legality gate:
    *   - kFuseBreak: reject the fusion outright.
-   *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
+   *   - kFuseDepend: profit-gated via FuseProfit; fuse only when the profiled
+   *     fused kernel beats running the block and the candidate separately.
    *   - kFuseThrough: fuse, subject to the CheckEdgeConvexity structural gate
    *     (skip edges whose merge would leave a sp -> successor path outside the
    *     group; they may become fusable later once the path joins either side).
@@ -563,8 +579,7 @@ class GraphPartitioner {
    * \param block The accumulating set of nodes fused into the seed's block.
    */
   void FuseSuccessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
-                     IndexedForwardGraph::Node* successor,
-                     std::unordered_set<IndexedForwardGraph::Node*>* block);
+                     IndexedForwardGraph::Node* successor, Block* block);
   /*!
    * \brief Recursively fuse backward (predecessor) neighbours into sp's group.
    *
@@ -576,7 +591,8 @@ class GraphPartitioner {
    * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
    * the two groups' root mapping types -- the legality gate:
    *   - kFuseBreak: reject the fusion outright.
-   *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
+   *   - kFuseDepend: profit-gated via FuseProfit; fuse only when the profiled
+   *     fused kernel beats running the block and the candidate separately.
    *   - kFuseThrough: fuse, subject to the CheckEdgeConvexity structural gate
    *     oriented along the direct edge predecessor -> sp.
    * On success, CommitFuseEdge(predecessor, sp, relation) unions the two groups
@@ -589,12 +605,10 @@ class GraphPartitioner {
    * \param block The accumulating set of nodes fused into the seed's block.
    */
   void FusePredecessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
-                       IndexedForwardGraph::Node* predecessor,
-                       std::unordered_set<IndexedForwardGraph::Node*>* block);
+                       IndexedForwardGraph::Node* predecessor, Block* block);
   // Prototype hook for the ambiguous kFuseDepend case. Returns false until the
   // profiling oracle is implemented.
-  bool FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
-                  IndexedForwardGraph::Node* candidate);
+  bool FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate);
 };
 
 }  // namespace relax
