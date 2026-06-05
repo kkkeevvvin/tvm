@@ -524,10 +524,7 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
   DNNFuseRelation relation = ClassifyDNNFuseRelation(sp_pat, succ_pat);
   LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
-  // `kFuseDepend` needs a profitability/codegen oracle that is not available
-  // in this commit.  Treat it as unfusible to preserve TVM's complex-group
-  // invariant in CombinePattern.
-  if (relation != DNNFuseRelation::kFuseThrough) return;
+  if (relation == DNNFuseRelation::kFuseBreak) return;
   // Check TVM path/codegen constraints before applying fuse_depend policy.
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
@@ -538,6 +535,14 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
     return;
   }
   LOG(INFO) << "    CheckPath: true";
+  if (relation == DNNFuseRelation::kFuseDepend) {
+    bool profitable = FuseProfit(*block, successor);
+    if (!profitable) {
+      LOG(INFO) << "    kFuseDepend: not profitable";
+      return;
+    }
+    LOG(INFO) << "    kFuseDepend: profitable";
+  }
   LOG(INFO) << "    CommitFuse";
   CommitFuse(sp, successor);
   block->insert(successor);
@@ -559,10 +564,7 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
   DNNFuseRelation relation = ClassifyDNNFuseRelation(pred_pat, sp_pat);
   LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
-  // `kFuseDepend` needs a profitability/codegen oracle that is not available
-  // in this commit.  Treat it as unfusible to preserve TVM's complex-group
-  // invariant in CombinePattern.
-  if (relation != DNNFuseRelation::kFuseThrough) return;
+  if (relation == DNNFuseRelation::kFuseBreak) return;
   // Check TVM path/codegen constraints before applying fuse_depend policy.
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
@@ -573,6 +575,14 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
     return;
   }
   LOG(INFO) << "    CheckPath: true";
+  if (relation == DNNFuseRelation::kFuseDepend) {
+    bool profitable = FuseProfit(*block, predecessor);
+    if (!profitable) {
+      LOG(INFO) << "    kFuseDepend: not profitable";
+      return;
+    }
+    LOG(INFO) << "    kFuseDepend: profitable";
+  }
   LOG(INFO) << "    CommitFuse";
   CommitFuse(predecessor, sp);
   block->insert(predecessor);
@@ -606,6 +616,13 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
+}
+
+bool GraphPartitioner::FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
+                                  IndexedForwardGraph::Node* candidate) {
+  LOG(INFO) << "    kFuseDepend: FuseProfit prototype disabled for block_size=" << block.size()
+            << " candidate=node[" << candidate->index << "]";
+  return false;
 }
 
 }  // namespace relax
