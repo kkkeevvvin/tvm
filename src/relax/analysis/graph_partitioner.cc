@@ -19,6 +19,10 @@
 
 #include "./graph_partitioner.h"
 
+#include <tvm/tir/function.h>
+
+#include <algorithm>
+#include <sstream>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -615,6 +619,21 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
+}
+
+double GraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node) {
+  LOG(INFO) << "  profiling fallback: TimeNode disabled for node[" << node->index << "]";
+  return -1.0;
+}
+
+double GraphPartitioner::TimeFusedBlock(
+    const std::vector<const IndexedForwardGraph::Node*>& nodes) {
+  std::ostringstream names;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    names << (i ? " + " : "") << (nodes[i]->gvar ? nodes[i]->gvar->name_hint : ffi::String("?"));
+  }
+  LOG(INFO) << "  profiling fallback: TimeFusedBlock disabled for " << names.str();
+  return -1.0;
 }
 
 bool GraphPartitioner::FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate) {
