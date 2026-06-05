@@ -27,6 +27,40 @@ namespace tvm {
 namespace relax {
 
 namespace {
+enum class DNNFuseRelation {
+  kFuseThrough,
+  kFuseBreak,
+  kFuseDepend,
+};
+
+const char* DNNFuseRelationName(DNNFuseRelation decision) {
+  switch (decision) {
+    case DNNFuseRelation::kFuseThrough:
+      return "fuse_through";
+    case DNNFuseRelation::kFuseBreak:
+      return "fuse_break";
+    case DNNFuseRelation::kFuseDepend:
+      return "fuse_depend";
+  }
+  return "unknown";
+}
+
+DNNFuseRelation ClassifyDNNFuseRelation(OpPatternKind src, OpPatternKind sink) {
+  if (src == kOutEWiseFusable && (sink == kBroadcast || sink == kInjective)) {
+    return DNNFuseRelation::kFuseDepend;
+  }
+  if (src == kCommReduce && (sink == kBroadcast || sink == kInjective)) {
+    return DNNFuseRelation::kFuseDepend;
+  }
+  if (src == kBroadcast && sink == kInjective) {
+    return DNNFuseRelation::kFuseDepend;
+  }
+  if (src > kBroadcast && sink > kBroadcast) {
+    return DNNFuseRelation::kFuseBreak;
+  }
+  return DNNFuseRelation::kFuseThrough;
+}
+
 IndexedForwardGraph::Node* FindMinElemWise(
     const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
@@ -488,16 +522,23 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
-  bool bad_relation = sp_pat > kBroadcast && succ_pat > kBroadcast;
-  LOG(INFO) << "    bad_relation = " << (bad_relation ? "true" : "false");
-  // return if successor can not be fused
-  if (bad_relation) return;
-  // check the constraint requirement
+  DNNFuseRelation relation = ClassifyDNNFuseRelation(sp_pat, succ_pat);
+  LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
+  // `kFuseDepend` needs a profitability/codegen oracle that is not available
+  // in this commit.  Treat it as unfusible to preserve TVM's complex-group
+  // invariant in CombinePattern.
+  if (relation != DNNFuseRelation::kFuseThrough) return;
+  // Check TVM path/codegen constraints before applying fuse_depend policy.
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
     return kind <= kInjective;
   };
-  if (!CheckPath(sp, successor, fcond)) return;
+  if (!CheckPath(sp, successor, fcond)) {
+    LOG(INFO) << "    CheckPath: false";
+    return;
+  }
+  LOG(INFO) << "    CheckPath: true";
+  LOG(INFO) << "    CommitFuse";
   CommitFuse(sp, successor);
   block->insert(successor);
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
@@ -516,16 +557,23 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
-  bool bad_relation = sp_pat > kBroadcast && pred_pat > kBroadcast;
-  LOG(INFO) << "    bad_relation = " << (bad_relation ? "true" : "false");
-  // return if predecessor can not be fused
-  if (bad_relation) return;
-  // check the constraint requirement
+  DNNFuseRelation relation = ClassifyDNNFuseRelation(pred_pat, sp_pat);
+  LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
+  // `kFuseDepend` needs a profitability/codegen oracle that is not available
+  // in this commit.  Treat it as unfusible to preserve TVM's complex-group
+  // invariant in CombinePattern.
+  if (relation != DNNFuseRelation::kFuseThrough) return;
+  // Check TVM path/codegen constraints before applying fuse_depend policy.
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
     return kind <= kInjective;
   };
-  if (!CheckPath(predecessor, sp, fcond)) return;
+  if (!CheckPath(predecessor, sp, fcond)) {
+    LOG(INFO) << "    CheckPath: false";
+    return;
+  }
+  LOG(INFO) << "    CheckPath: true";
+  LOG(INFO) << "    CommitFuse";
   CommitFuse(predecessor, sp);
   block->insert(predecessor);
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
