@@ -515,8 +515,7 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
 }
 
 void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
-                                     IndexedForwardGraph::Node* successor,
-                                     std::unordered_set<IndexedForwardGraph::Node*>* block) {
+                                     IndexedForwardGraph::Node* successor, Block* block) {
   LOG(INFO) << "  successor of node[" << sp->index << "]:"
             << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
             << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
@@ -553,8 +552,7 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
 }
 
 void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
-                                       IndexedForwardGraph::Node* predecessor,
-                                       std::unordered_set<IndexedForwardGraph::Node*>* block) {
+                                       IndexedForwardGraph::Node* predecessor, Block* block) {
   LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
             << " node[" << predecessor->index << "] "
             << ffi::GetRef<ObjectRef>(predecessor->ref)
@@ -602,7 +600,7 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   // generate seed
   while ((seed = FindMinElemWise(unfused_ops)) != nullptr) {
     // block = [ seed ]
-    std::unordered_set<IndexedForwardGraph::Node*> block{seed};
+    Block block{seed};
     LOG(INFO) << "\nkElemWise op with min output_size:"
               << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
               << " bytes=" << seed->output_size;
@@ -619,8 +617,7 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   }
 }
 
-bool GraphPartitioner::FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
-                                  IndexedForwardGraph::Node* candidate) {
+bool GraphPartitioner::FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate) {
   LOG(INFO) << "    kFuseDepend: FuseProfit prototype disabled for block_size=" << block.size()
             << " candidate=node[" << candidate->index << "]";
   return false;

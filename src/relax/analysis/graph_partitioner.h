@@ -29,6 +29,7 @@
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/type.h>
 
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -352,16 +353,29 @@ class GraphPartitioner {
                            DominatorTree::Node* dom_node, size_t dom_parent_index,
                            int phase);
 
+  // A fusion block: the set of nodes merged so far. Ordered by IFG index
+  // (== post-DFS topological order) so iteration is always producer-before-
+  // consumer, which is what TimeFusedBlock / FuseProfit need. The set dedups
+  // on insert (a diamond in the IFG can reach the same node twice); membership
+  // lookup is never used, so an ordered set fits the access pattern better than
+  // an unordered_set that would have to be copied out and re-sorted per probe.
+  struct NodeByIndex {
+    bool operator()(const IndexedForwardGraph::Node* a,
+                    const IndexedForwardGraph::Node* b) const {
+      return a->index < b->index;
+    }
+  };
+  using Block = std::set<IndexedForwardGraph::Node*, NodeByIndex>;
+
   // test
   void RunDNNFuse(const IndexedForwardGraph& graph);
   void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
-                     std::unordered_set<IndexedForwardGraph::Node*>* block);
+                     Block* block);
   void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
-                       std::unordered_set<IndexedForwardGraph::Node*>* block);
+                       Block* block);
   // Prototype hook for the ambiguous kFuseDepend case. Returns false until the
   // profiling oracle is implemented.
-  bool FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
-                  IndexedForwardGraph::Node* candidate);
+  bool FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate);
 };
 
 }  // namespace relax
