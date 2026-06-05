@@ -212,11 +212,12 @@ bool GraphPartitioner::CheckPath(IndexedForwardGraph::Node* src, IndexedForwardG
 }
 
 OpPatternKind CombinePattern(OpPatternKind lhs, OpPatternKind rhs) {
-  if (lhs > kBroadcast && rhs > kBroadcast) {
-    LOG(FATAL) << "Cannot merge two complex group together";
-  }
-  if (lhs > rhs) return lhs;
-  return rhs;
+  // TVM normally aborts here when both groups are complex (> kBroadcast). The
+  // DNNFuse profit oracle (FuseSuccessor's kFuseDepend branch) deliberately
+  // commits such merges, so take the more complex pattern instead of fataling.
+  // NOTE: the resulting group is not guaranteed to be handled by FuseTIR /
+  // codegen; this is the scoped-out DNNFusion complex-fusion territory.
+  return lhs > rhs ? lhs : rhs;
 }
 
 void GraphPartitioner::MergeFromTo(Group* child, Group* parent) {
