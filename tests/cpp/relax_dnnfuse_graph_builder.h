@@ -82,8 +82,11 @@ class GraphBuilder {
   // are allocated from part_arena_, kept alive by this builder so the caller can
   // inspect FindRoot() after the call returns.
   std::vector<GraphPartitioner::Group*> RunDNNFuse() {
-    GraphPartitioner partitioner(&part_arena_, /*opt_level=*/6, /*max_fuse_depth=*/256,
-                                 /*max_function_args=*/1024);
+    // Synthetic graphs carry no call_tir bindings, so an empty module is
+    // enough: FuseProfit's timing helpers fail soft (-1) and kFuseDepend
+    // edges stay unfused, matching the pre-profiler expectations.
+    GraphPartitioner partitioner(IRModule(), &part_arena_, /*opt_level=*/6,
+                                 /*max_fuse_depth=*/256, /*max_function_args=*/1024);
     return partitioner.Partition(graph_);
   }
 

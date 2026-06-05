@@ -25,12 +25,14 @@
 #ifndef TVM_RELAX_ANALYSIS_GRAPH_PARTITIONER_H_
 #define TVM_RELAX_ANALYSIS_GRAPH_PARTITIONER_H_
 
+#include <tvm/ir/module.h>
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/struct_info.h>
 #include <tvm/relax/type.h>
 
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "../../support/arena.h"
@@ -332,9 +334,10 @@ class DominatorTree {
  */
 class GraphPartitioner {
  public:
-  explicit GraphPartitioner(support::Arena* arena, int opt_level, size_t max_fuse_depth,
-                            size_t max_function_args)
-      : arena_(arena),
+  explicit GraphPartitioner(IRModule mod, support::Arena* arena, int opt_level,
+                            size_t max_fuse_depth, size_t max_function_args)
+      : mod_(std::move(mod)),
+        arena_(arena),
         opt_level_(opt_level),
         max_fuse_depth_(max_fuse_depth),
         max_function_args_(max_function_args) {}
@@ -379,6 +382,8 @@ class GraphPartitioner {
   std::vector<Group*> Partition(const IndexedForwardGraph& graph);
 
  private:
+  /*! \brief The IRModule the graph being partitioned was created from. */
+  IRModule mod_;
   /*! \brief The internal arena for temporary space. */
   support::Arena* arena_;
   /*! \brief optimization level for fuse operation. */
