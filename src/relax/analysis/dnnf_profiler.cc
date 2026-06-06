@@ -26,10 +26,24 @@
 
 #include "./dnnf_profiler.h"
 
+#include <tvm/ffi/function.h>
 #include <tvm/target/target.h>
 
 namespace tvm {
 namespace relax {
+
+namespace {
+
+// STUB: schedule `func` and build it on `target`, returning the callable device
+// kernel; nullopt on failure. An unscheduled PrimFunc has no thread bindings, so
+// it must be scheduled (DefaultGPUSchedule / MetaSchedule) before tir.build.
+// Not implemented yet -- always returns nullopt.
+ffi::Optional<ffi::Function> BuildPrimFuncCUDA(const tir::PrimFunc& func, const Target& target) {
+  LOG(INFO) << "  BuildPrimFuncCUDA stub: build disabled";
+  return std::nullopt;
+}
+
+}  // namespace
 
 // Resolve the PrimFunc backing `node` through its cached call_tir GlobalVar.
 // Returns nullopt for nodes with no call_tir binding (gvar == nullptr) or whose
@@ -60,11 +74,27 @@ double TimePrimFunc(const tir::PrimFunc& func) {
   return -1.0;
 }
 
-// STUB: schedule, build, and time `func` on the CUDA device. Not implemented
-// yet -- always returns -1.0 (treated as a timing failure by FuseProfit).
+// Build `func` (BuildPrimFuncCUDA) on the current target's device, then time it;
+// -1 if the build fails. The build target (and hence the profiled device) is
+// taken from the enclosing `with target:` scope (Target::Current), so the driver
+// must wrap its FuseOps call in `with TARGET:`; ICHECK-fails if no target is in
+// scope.
+//
+// Only the build step is wired up so far (and BuildPrimFuncCUDA is itself a
+// stub); device-argument materialization and timing are not implemented yet, so
+// this currently returns -1.0.
 double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   ICHECK(func.defined()) << "TimePrimFuncCUDA called with an undefined PrimFunc";
-  LOG(INFO) << "  TimePrimFuncCUDA stub: profiling disabled";
+  Target target = Target::Current(/*allow_not_defined=*/true);
+  ICHECK(target.defined())
+      << "TimePrimFuncCUDA requires a target in the current context: wrap the "
+         "FuseOps call in `with target:` so Target::Current() is set.";
+
+  ffi::Optional<ffi::Function> kernel = BuildPrimFuncCUDA(func, target);
+  if (!kernel) return -1.0;
+
+  // TODO: materialize device args and time the kernel.
+  LOG(INFO) << "  TimePrimFuncCUDA: kernel built; timing not implemented yet";
   return -1.0;
 }
 

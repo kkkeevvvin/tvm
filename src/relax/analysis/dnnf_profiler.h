@@ -56,11 +56,11 @@ ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
 double TimePrimFunc(const tir::PrimFunc& func);
 
 /*!
- * \brief Schedule, build, and time `func` on the CUDA device.
+ * \brief Build `func` on the current CUDA device, feed it inputs, and time it.
  * \param func The PrimFunc to schedule, build, and run.
- * \return Average per-run latency in microseconds, or -1.0 on failure.
- *
- *  STUB: CUDA device timing not implemented yet; always returns -1.0.
+ * \return Latency in microseconds, or -1.0 if the build fails. Currently always
+ *  -1.0: only the build step is wired up (and is itself a stub); device-argument
+ *  materialization and timing are not implemented yet.
  */
 double TimePrimFuncCUDA(const tir::PrimFunc& func);
 
