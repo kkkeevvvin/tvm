@@ -45,7 +45,9 @@ ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
 
 // STUB: schedule, build, and time `func` on the GPU. Not implemented yet --
 // always returns -1.0 (treated as a timing failure by FuseProfit).
-double TimePrimFunc(const tir::PrimFunc&) {
+double TimePrimFunc(const tir::PrimFunc& func) {
+  ICHECK(func.defined()) << "TimePrimFunc called with an undefined PrimFunc";
+  LOG(INFO) << "  TimePrimFunc:\n" << func;
   LOG(INFO) << "  TimePrimFunc stub: profiling disabled";
   return -1.0;
 }
