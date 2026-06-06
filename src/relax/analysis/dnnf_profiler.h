@@ -46,13 +46,23 @@ ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
                                           const IndexedForwardGraph::Node* node);
 
 /*!
- * \brief Schedule, build, and time `func` on the GPU.
+ * \brief Schedule, build, and time `func` on the current target's device.
  * \param func The PrimFunc to schedule, build, and run.
  * \return Average per-run latency in microseconds, or -1.0 on failure.
  *
- *  STUB: device timing not implemented yet; always returns -1.0.
+ *  Dispatches on Target::Current(): a CUDA target routes to TimePrimFuncCUDA;
+ *  other targets are not yet supported and return -1.0.
  */
 double TimePrimFunc(const tir::PrimFunc& func);
+
+/*!
+ * \brief Schedule, build, and time `func` on the CUDA device.
+ * \param func The PrimFunc to schedule, build, and run.
+ * \return Average per-run latency in microseconds, or -1.0 on failure.
+ *
+ *  STUB: CUDA device timing not implemented yet; always returns -1.0.
+ */
+double TimePrimFuncCUDA(const tir::PrimFunc& func);
 
 }  // namespace relax
 }  // namespace tvm

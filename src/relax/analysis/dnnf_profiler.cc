@@ -26,6 +26,8 @@
 
 #include "./dnnf_profiler.h"
 
+#include <tvm/target/target.h>
+
 namespace tvm {
 namespace relax {
 
@@ -43,12 +45,26 @@ ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
   return mod->Lookup(gvar).as<tir::PrimFunc>();
 }
 
-// STUB: schedule, build, and time `func` on the GPU. Not implemented yet --
-// always returns -1.0 (treated as a timing failure by FuseProfit).
+// Dispatch on the current target: a CUDA target routes to TimePrimFuncCUDA;
+// other targets are not yet supported and return -1.0 (treated as a timing
+// failure by FuseProfit). The target comes from the enclosing `with target:`
+// scope (the driver wraps FuseOps in it so Target::Current() is set).
 double TimePrimFunc(const tir::PrimFunc& func) {
   ICHECK(func.defined()) << "TimePrimFunc called with an undefined PrimFunc";
   LOG(INFO) << "  TimePrimFunc:\n" << func;
-  LOG(INFO) << "  TimePrimFunc stub: profiling disabled";
+  Target target = Target::Current(/*allow_not_defined=*/true);
+  if (target.defined() && target->kind->name == "cuda") {
+    return TimePrimFuncCUDA(func);
+  }
+  LOG(INFO) << "  TimePrimFunc: no CUDA target in scope; profiling disabled";
+  return -1.0;
+}
+
+// STUB: schedule, build, and time `func` on the CUDA device. Not implemented
+// yet -- always returns -1.0 (treated as a timing failure by FuseProfit).
+double TimePrimFuncCUDA(const tir::PrimFunc& func) {
+  ICHECK(func.defined()) << "TimePrimFuncCUDA called with an undefined PrimFunc";
+  LOG(INFO) << "  TimePrimFuncCUDA stub: profiling disabled";
   return -1.0;
 }
 
