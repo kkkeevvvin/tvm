@@ -18,6 +18,7 @@
  */
 
 #include "./graph_partitioner.h"
+#include "./dnnf_profiler.h"
 
 #include <tvm/tir/function.h>
 
@@ -622,8 +623,13 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
 }
 
 double GraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node) {
-  LOG(INFO) << "  profiling fallback: TimeNode disabled for node[" << node->index << "]";
-  return -1.0;
+  ffi::Optional<tir::PrimFunc> func = FindPrimFunc(mod_, node);
+  if (!func) {
+    LOG(INFO) << "  node has no PrimFunc; skip profiling";
+    return -1.0;
+  }
+  LOG(INFO) << "  TimeNode: " << node->gvar->name_hint;
+  return TimePrimFunc(func.value());
 }
 
 double GraphPartitioner::TimeFusedBlock(
