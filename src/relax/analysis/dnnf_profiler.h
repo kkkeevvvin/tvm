@@ -39,9 +39,8 @@ namespace relax {
  * \brief Resolve the PrimFunc backing `node` through node->gvar in `mod`.
  * \param mod The IRModule the node's call_tir binding lives in.
  * \param node The IndexedForwardGraph node to resolve.
- * \return The node's PrimFunc, or nullopt if it has no cached call_tir GlobalVar.
- *
- *  STUB: PrimFunc lookup not implemented yet; always returns nullopt.
+ * \return The node's PrimFunc, or nullopt if it has no cached call_tir GlobalVar
+ *  (or that GlobalVar resolves to a non-PrimFunc).
  */
 ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
                                           const IndexedForwardGraph::Node* node);

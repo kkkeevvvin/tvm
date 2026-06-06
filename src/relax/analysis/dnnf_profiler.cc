@@ -29,11 +29,18 @@
 namespace tvm {
 namespace relax {
 
-// STUB: resolve the PrimFunc backing `node` through node->gvar in `mod`. Not
-// implemented yet -- always returns nullopt so TimeNode reports "no PrimFunc".
-ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule&, const IndexedForwardGraph::Node*) {
-  LOG(INFO) << "  FindPrimFunc stub: PrimFunc lookup disabled";
-  return std::nullopt;
+// Resolve the PrimFunc backing `node` through its cached call_tir GlobalVar.
+// Returns nullopt for nodes with no call_tir binding (gvar == nullptr) or whose
+// gvar resolves to a non-PrimFunc (e.g. a relax Function) -- either way there is
+// no single PrimFunc to time.
+ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
+                                          const IndexedForwardGraph::Node* node) {
+  if (node->gvar == nullptr) return std::nullopt;
+  GlobalVar gvar = ffi::GetRef<GlobalVar>(node->gvar);
+  // The gvar is cached during IFG construction from a call_tir in `mod`, so it
+  // is expected to resolve; guard the lookup anyway to stay arena-safe.
+  if (!mod->ContainGlobalVar(gvar->name_hint)) return std::nullopt;
+  return mod->Lookup(gvar).as<tir::PrimFunc>();
 }
 
 // STUB: schedule, build, and time `func` on the GPU. Not implemented yet --
