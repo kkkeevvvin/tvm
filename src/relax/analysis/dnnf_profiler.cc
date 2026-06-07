@@ -40,6 +40,7 @@ namespace {
 
 /*!
  * \brief Log the CUDA C source of the first "cuda" submodule (DFS over imports).
+ * \param mod The runtime module to search for a "cuda" submodule.
  * \note A GPU build keeps device kernels in an imported submodule, not the root,
  *       so we recurse into imports. Best-effort: silent if none is found.
  */
@@ -55,6 +56,9 @@ void DumpCUDASource(const ffi::Module& mod) {
 
 /*!
  * \brief Build `func` into a callable CUDA kernel, or nullopt if the build fails.
+ * \param func The PrimFunc to schedule and build.
+ * \param target The CUDA target to build for (also attached to the PrimFunc).
+ * \return The built function looked up by name, or nullopt if the build throws.
  * \details Names the PrimFunc and wraps it in a single-function IRModule (with
  *          `target` attached as kTarget); runs DefaultGPUSchedule to give the
  *          otherwise unscheduled func its GPU thread bindings; tir.builds it for
@@ -97,10 +101,6 @@ ffi::Optional<ffi::Function> BuildPrimFuncCUDA(const tir::PrimFunc& func, const 
 
 }  // namespace
 
-// Resolve the PrimFunc backing `node` through its cached call_tir GlobalVar.
-// Returns nullopt for nodes with no call_tir binding (gvar == nullptr) or whose
-// gvar resolves to a non-PrimFunc (e.g. a relax Function) -- either way there is
-// no single PrimFunc to time.
 ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
                                           const IndexedForwardGraph::Node* node) {
   if (node->gvar == nullptr) return std::nullopt;
@@ -111,10 +111,6 @@ ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
   return mod->Lookup(gvar).as<tir::PrimFunc>();
 }
 
-// Dispatch on the current target: a CUDA target routes to TimePrimFuncCUDA;
-// other targets are not yet supported and return -1.0 (treated as a timing
-// failure by FuseProfit). The target comes from the enclosing `with target:`
-// scope (the driver wraps FuseOps in it so Target::Current() is set).
 double TimePrimFunc(const tir::PrimFunc& func) {
   ICHECK(func.defined()) << "TimePrimFunc called with an undefined PrimFunc";
   LOG(INFO) << "  TimePrimFunc:\n" << func;
@@ -126,15 +122,6 @@ double TimePrimFunc(const tir::PrimFunc& func) {
   return -1.0;
 }
 
-// Build `func` (BuildPrimFuncCUDA) on the current target's device, then time it;
-// -1 if the build fails. The build target (and hence the profiled device) is
-// taken from the enclosing `with target:` scope (Target::Current), so the driver
-// must wrap its FuseOps call in `with TARGET:`; ICHECK-fails if no target is in
-// scope.
-//
-// Only the build step is wired up so far (and BuildPrimFuncCUDA is itself a
-// stub); device-argument materialization and timing are not implemented yet, so
-// this currently returns -1.0.
 double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   ICHECK(func.defined()) << "TimePrimFuncCUDA called with an undefined PrimFunc";
   Target target = Target::Current(/*allow_not_defined=*/true);

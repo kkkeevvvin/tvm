@@ -36,11 +36,12 @@ namespace tvm {
 namespace relax {
 
 /*!
- * \brief Resolve the PrimFunc backing `node` through node->gvar in `mod`.
+ * \brief Resolve the PrimFunc backing `node` through its cached call_tir GlobalVar.
  * \param mod The IRModule the node's call_tir binding lives in.
  * \param node The IndexedForwardGraph node to resolve.
- * \return The node's PrimFunc, or nullopt if it has no cached call_tir GlobalVar
- *  (or that GlobalVar resolves to a non-PrimFunc).
+ * \return The node's PrimFunc, or nullopt for nodes with no call_tir binding
+ *  (gvar == nullptr) or whose gvar resolves to a non-PrimFunc (e.g. a relax
+ *  Function) -- either way there is no single PrimFunc to time.
  */
 ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
                                           const IndexedForwardGraph::Node* node);
@@ -49,18 +50,24 @@ ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
  * \brief Schedule, build, and time `func` on the current target's device.
  * \param func The PrimFunc to schedule, build, and run.
  * \return Average per-run latency in microseconds, or -1.0 on failure.
- *
- *  Dispatches on Target::Current(): a CUDA target routes to TimePrimFuncCUDA;
- *  other targets are not yet supported and return -1.0.
+ * \details Dispatches on the current target: a CUDA target routes to
+ *  TimePrimFuncCUDA; other targets are not yet supported and return -1.0
+ *  (treated as a timing failure by FuseProfit). The target comes from the
+ *  enclosing `with target:` scope (the driver wraps FuseOps in it so
+ *  Target::Current() is set).
  */
 double TimePrimFunc(const tir::PrimFunc& func);
 
 /*!
- * \brief Build `func` on the current CUDA device, feed it inputs, and time it.
+ * \brief Build `func` (BuildPrimFuncCUDA) on the current target's device, then
+ *  time it.
  * \param func The PrimFunc to schedule, build, and run.
  * \return Latency in microseconds, or -1.0 if the build fails. Currently always
- *  -1.0: only the build step is wired up (and is itself a stub); device-argument
- *  materialization and timing are not implemented yet.
+ *  -1.0: only the build step is wired up so far (and BuildPrimFuncCUDA is itself
+ *  a stub); device-argument materialization and timing are not implemented yet.
+ * \details The build target (and hence the profiled device) is taken from the
+ *  enclosing `with target:` scope (Target::Current), so the driver must wrap its
+ *  FuseOps call in `with TARGET:`; ICHECK-fails if no target is in scope.
  */
 double TimePrimFuncCUDA(const tir::PrimFunc& func);
 
