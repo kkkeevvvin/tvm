@@ -27,20 +27,72 @@
 #include "./dnnf_profiler.h"
 
 #include <tvm/ffi/function.h>
+#include <tvm/ir/attrs.h>
+#include <tvm/ir/function.h>
+#include <tvm/runtime/module.h>
 #include <tvm/target/target.h>
+#include <tvm/tir/transform.h>
 
 namespace tvm {
 namespace relax {
 
 namespace {
 
-// STUB: schedule `func` and build it on `target`, returning the callable device
-// kernel; nullopt on failure. An unscheduled PrimFunc has no thread bindings, so
-// it must be scheduled (DefaultGPUSchedule / MetaSchedule) before tir.build.
-// Not implemented yet -- always returns nullopt.
+/*!
+ * \brief Log the CUDA C source of the first "cuda" submodule (DFS over imports).
+ * \note A GPU build keeps device kernels in an imported submodule, not the root,
+ *       so we recurse into imports. Best-effort: silent if none is found.
+ */
+void DumpCUDASource(const ffi::Module& mod) {
+  if (mod->kind() == std::string("cuda")) {
+    LOG(INFO) << "  BuildPrimFuncCUDA: generated CUDA source:\n" << mod->InspectSource("");
+    return;
+  }
+  for (const Any& im : mod->imports()) {
+    DumpCUDASource(im.cast<ffi::Module>());
+  }
+}
+
+/*!
+ * \brief Build `func` into a callable CUDA kernel, or nullopt if the build fails.
+ * \details Names the PrimFunc and wraps it in a single-function IRModule (with
+ *          `target` attached as kTarget); runs DefaultGPUSchedule to give the
+ *          otherwise unscheduled func its GPU thread bindings; tir.builds it for
+ *          `target`; dumps the generated CUDA source; and returns the built
+ *          function by name. Any tvm::Error is caught and turned into nullopt, so
+ *          a failing build never aborts the caller.
+ * \note We avoid opening a `With<Target>` scope here on purpose: if the build
+ *       throws while such a scope is live, the scope's destructor (ExitWithScope)
+ *       runs mid-unwind and its ICHECK would std::terminate the process. The
+ *       current target instead comes from the caller's outer scope (the driver's
+ *       `with TARGET:` around FuseOps).
+ */
 ffi::Optional<ffi::Function> BuildPrimFuncCUDA(const tir::PrimFunc& func, const Target& target) {
-  LOG(INFO) << "  BuildPrimFuncCUDA stub: build disabled";
-  return std::nullopt;
+  try {
+    const ffi::String func_name = "tir_function";
+    tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, func_name);
+    named = WithAttr(named, tvm::attr::kTarget, target);
+    GlobalVar gv(func_name);
+    ffi::Map<GlobalVar, BaseFunc> funcs;
+    funcs.Set(gv, named);
+    IRModule m(funcs);
+    // Apply thread bindings via the DefaultGPUSchedule heuristic.
+    m = tir::transform::DefaultGPUSchedule()(m);
+    tir::PrimFunc scheduled = Downcast<tir::PrimFunc>(m->Lookup(gv));
+    LOG(INFO) << "  BuildPrimFuncCUDA: scheduled PrimFunc:\n" << scheduled;
+    // "tir.build" is the Python `build` function in python/tvm/tir/build.py
+    // (registered there via tvm.register_global_func("tir.build", build)). It
+    // wraps the PrimFunc in an IRModule, binds the target, runs the TIR lowering
+    // pipeline, splits host/device modules, and codegens each to a runtime
+    // Module (CUDA device code imported into the host module).
+    const auto build = tvm::ffi::Function::GetGlobalRequired("tir.build");
+    ffi::Module rt_module = build(scheduled, target).cast<ffi::Module>();
+    DumpCUDASource(rt_module);
+    return rt_module->GetFunction(func_name).value();
+  } catch (const tvm::Error& err) {
+    LOG(INFO) << "  BuildPrimFuncCUDA: build failed: " << err.what();
+    return std::nullopt;
+  }
 }
 
 }  // namespace
