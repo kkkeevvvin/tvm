@@ -30,8 +30,11 @@
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/function.h>
 #include <tvm/runtime/module.h>
+#include <tvm/runtime/tensor.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/transform.h>
+
+#include <vector>
 
 namespace tvm {
 namespace relax {
@@ -99,6 +102,25 @@ ffi::Optional<ffi::Function> BuildPrimFuncCUDA(const tir::PrimFunc& func, const 
   }
 }
 
+/*!
+ * \brief Materialize one random device-resident argument per PrimFunc parameter.
+ * \param func The PrimFunc whose `buffer_map` describes the argument tensors.
+ * \param cuda_dev The device the returned tensors live on (the profiled device).
+ * \param host_dev The host device the tensors are staged on before the copy.
+ * \return One device tensor per param (matching `func->params` order), or nullopt
+ *  if any param is not a buffer or has a non-static (dynamic) shape -- both make
+ *  the func unprofilable, so the caller treats nullopt as a timing failure.
+ * \details TODO(prfl): port the dev/prfl implementation -- iterate
+ *  `func->params`, resolve each through `func->buffer_map`, read the static
+ *  shape off `buf->shape` (IntImm dims), allocate a host `runtime::Tensor`, fill
+ *  float32 buffers with uniform random values, and `CopyTo(cuda_dev)`. Returns
+ *  nullopt for now.
+ */
+ffi::Optional<std::vector<runtime::Tensor>> MakeRandomArg(const tir::PrimFunc& func,
+                                                          DLDevice cuda_dev, DLDevice host_dev) {
+  return std::nullopt;
+}
+
 }  // namespace
 
 ffi::Optional<tir::PrimFunc> FindPrimFunc(const IRModule& mod,
@@ -128,13 +150,17 @@ double TimePrimFuncCUDA(const tir::PrimFunc& func) {
   ICHECK(target.defined())
       << "TimePrimFuncCUDA requires a target in the current context: wrap the "
          "FuseOps call in `with target:` so Target::Current() is set.";
-
   ffi::Optional<ffi::Function> kernel = BuildPrimFuncCUDA(func, target);
   if (!kernel) return -1.0;
-
-  // TODO: materialize device args and time the kernel.
-  LOG(INFO) << "  TimePrimFuncCUDA: kernel built; timing not implemented yet";
-  return -1.0;
+  // Device follows the current target, matching TVM's own Target->Device
+  // convention (src/target/target.cc); host staging follows the target host
+  // (CPU/llvm by default).
+  DLDevice dev = {static_cast<DLDeviceType>(target->GetTargetDeviceType()), 0};
+  Target host_target = target->GetHost().value_or(Target("llvm"));
+  DLDevice host_dev = {static_cast<DLDeviceType>(host_target->GetTargetDeviceType()), 0};
+  ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomArg(func, dev, host_dev);
+  if (!args) return -1.0;
+  return -1;
 }
 
 }  // namespace relax
