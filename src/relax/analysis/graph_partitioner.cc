@@ -88,6 +88,14 @@ IndexedForwardGraph::Node* FindMinElemWise(
   }
   return min_node;
 }
+
+size_t CountOutputs(const IndexedForwardGraph::Node* node) {
+  size_t count = 0;
+  for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
+    ++count;
+  }
+  return count;
+}
 }  // namespace
 
 DominatorTree DominatorTree::PostDom(support::Arena* arena, const IndexedForwardGraph& graph) {
@@ -272,6 +280,16 @@ void GraphPartitioner::CommitFuse(IndexedForwardGraph::Node* src, IndexedForward
   visited_.clear();
   ICHECK(src != sink);
   CommitFuse_(src, sink, target);
+}
+
+void GraphPartitioner::CommitDNNFuse(IndexedForwardGraph::Node* src,
+                                     IndexedForwardGraph::Node* sink) {
+  ICHECK(src != sink);
+  Group* source = groups_[src->index];
+  Group* target = groups_[sink->index];
+  ICHECK(source != nullptr);
+  ICHECK(target != nullptr);
+  MergeFromTo(source, target);
 }
 
 size_t GraphPartitioner::CountNodesUptoSink_(IndexedForwardGraph::Node* src,
@@ -519,19 +537,16 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
+  if (sp_pat == kOpaque) return;
+  if (CountOutputs(sp) != 1) return;
+  if (succ_pat == kOpaque && successor->outputs.head != nullptr) return;
   DNNFuseRelation relation = DNNFuseRelation::Classify(sp_pat, succ_pat);
   LOG(INFO) << "    relation = " << relation.Name();
   // return if successor can not be fused
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
-  // check the constraint requirement
-  auto fcond = [](OpPatternKind kind, bool is_sink) {
-    if (is_sink) return kind <= kOutEWiseFusable;
-    return kind <= kInjective;
-  };
-  if (!CheckPath(sp, successor, fcond)) return;
-  CommitFuse(sp, successor);
+  CommitDNNFuse(sp, successor);
   block->insert(successor);
   // Recurse into the fused successor to extend the chain past one hop.
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
@@ -548,19 +563,15 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
+  if (sp_pat == kOpaque || pred_pat == kOpaque) return;
+  if (CountOutputs(predecessor) != 1) return;
   DNNFuseRelation relation = DNNFuseRelation::Classify(pred_pat, sp_pat);
   LOG(INFO) << "    relation = " << relation.Name();
   // return if predecessor can not be fused
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
-  // check the constraint requirement
-  auto fcond = [](OpPatternKind kind, bool is_sink) {
-    if (is_sink) return kind <= kOutEWiseFusable;
-    return kind <= kInjective;
-  };
-  if (!CheckPath(predecessor, sp, fcond)) return;
-  CommitFuse(predecessor, sp);
+  CommitDNNFuse(predecessor, sp);
   block->insert(predecessor);
   // Recurse into the fused predecessor to extend the chain past one hop.
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {

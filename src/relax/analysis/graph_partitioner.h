@@ -287,6 +287,18 @@ class GraphPartitioner {
    */
   void CommitFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
 
+  /*!
+   * \brief Commit one direct DNNFuse edge by merging src's group into sink's group.
+   *
+   * Unlike CommitFuse, this helper does not walk paths and does not require sink
+   * to post-dominate src. RunDNNFuse calls it only for adjacent producer-consumer
+   * pairs reached through IndexedForwardGraph::Node inputs/outputs.
+   *
+   * \param src The producer-side node being fused.
+   * \param sink The consumer-side node being fused into.
+   */
+  void CommitDNNFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
+
   size_t CountNodesUptoSink_(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
   // Calculate the number of arguments for the node.
   size_t CountArgs_(IndexedForwardGraph::Node* src, const IndexedForwardGraph& graph,
@@ -334,16 +346,17 @@ class GraphPartitioner {
    */
   void RunDNNFuse(const IndexedForwardGraph& graph);
   /*!
-   * \brief Recursively fuse forward (successor) neighbours into sp's group.
+   * \brief Recursively fuse forward (successor) neighbours into the seed block.
    *
    * Implements RunDNNFuse's forward expansion (DNNFusion Listing 1
    * Step 2.1-2.3), walking Node::outputs along the data path sp -> successor.
-   * The successor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root patterns:
+   * The adjacent pair is committed based on DNNFuseRelation::Classify of the two
+   * groups' root patterns, after treating opaque intermediate nodes and
+   * non-linear producer edges as fusion boundaries:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
-   * On success, CommitFuse(sp, successor) unions the groups along the walk, the
+   * On success, CommitDNNFuse(sp, successor) unions the adjacent groups, the
    * successor is added to block, and expansion recurses into its successors.
    *
    * \param sp The seed node whose group is being extended.
@@ -353,19 +366,20 @@ class GraphPartitioner {
   void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
                      std::unordered_set<IndexedForwardGraph::Node*>* block);
   /*!
-   * \brief Recursively fuse backward (predecessor) neighbours into sp's group.
+   * \brief Recursively fuse backward (predecessor) neighbours into the seed block.
    *
-   * The backward mirror of FuseSuccessor. 
+   * The backward mirror of FuseSuccessor.
    *
    * Implements RunDNNFuse's backward expansion (DNNFusion Listing 1 Step 2.1-2.3),
-   * walking Node::inputs instead of Node::outputs, along the data path 
+   * walking Node::inputs instead of Node::outputs, along the data path
    * predecessor -> sp.
-   * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root patternsx:
+   * The adjacent pair is committed based on DNNFuseRelation::Classify of the two
+   * groups' root patterns, after treating opaque nodes and non-linear producer
+   * edges as fusion boundaries:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
-   * On success, CommitFuse(predecessor, sp) unions the groups along the walk, the
+   * On success, CommitDNNFuse(predecessor, sp) unions the adjacent groups, the
    * predecessor is added to block, and expansion recurses into its predecessors.
    *
    * \param sp The seed node whose group is being extended.
