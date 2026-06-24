@@ -26,6 +26,7 @@
 #define TVM_RELAX_ANALYSIS_GRAPH_PARTITIONER_H_
 
 #include <tvm/relax/op_attr_types.h>
+#include <tvm/relax/struct_info.h>
 #include <tvm/relax/type.h>
 
 #include <unordered_map>
@@ -39,6 +40,22 @@ namespace relax {
 
 using support::LinkedList;
 using support::LinkNode;
+
+/*!
+ * \brief Compute the size in bytes of a value with the given struct info.
+ *
+ * Tensors contribute (product of static shape dims) * dtype bytes; tuples are
+ * the sum of their fields. Returns -1 (the "unknown / dynamic / opaque"
+ * sentinel) when any tensor has a non-static shape, a non-integer dim, or the
+ * struct info is neither a tensor nor a tuple of computable fields.
+ *
+ * Defined in src/relax/transform/fuse_ops.cc; declared here so it is reachable
+ * from unit tests and other analysis code.
+ *
+ * \param sinfo The struct info to measure.
+ * \return The total byte size, or -1 if it cannot be determined statically.
+ */
+int64_t StructInfoBytes(const StructInfo& sinfo);
 
 /*!
  * \brief Indexed data flow graph in forward direction.

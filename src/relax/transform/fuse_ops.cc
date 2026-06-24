@@ -99,8 +99,6 @@ constexpr uint32_t kMaxFusedOps = 256;
 
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.max_depth", Integer);
 
-namespace {
-
 int64_t StructInfoBytes(const StructInfo& sinfo) {
   if (const auto* tensor_sinfo = sinfo.as<TensorStructInfoNode>()) {
     const auto* shape = tensor_sinfo->shape.as<ShapeExprNode>();
@@ -126,6 +124,8 @@ int64_t StructInfoBytes(const StructInfo& sinfo) {
   }
   return -1;
 }
+
+namespace {
 
 int64_t ComputeNodeOutputBytes(const tvm::Object* node_ref) {
   if (node_ref == nullptr || !node_ref->IsInstance<ExprNode>()) return -1;
