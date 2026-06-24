@@ -27,43 +27,6 @@ namespace tvm {
 namespace relax {
 
 namespace {
-class DNNFuseRelation {
- public:
-  enum Kind { kFuseThrough, kFuseBreak, kFuseDepend };
- /*!
-  * \brief Classify the fusion relation between a source and a sink op pattern.
-  * \param src The pattern of the source (producer) op.
-  * \param sink The pattern of the sink (consumer) op.
-  * \return The classified relation.
-  */
-  static DNNFuseRelation Classify(OpPatternKind src, OpPatternKind sink) {
-    if (src == kElemWise || sink == kElemWise)
-      return DNNFuseRelation(kFuseThrough);
-    if (src == kInjective && sink == kInjective)
-      return DNNFuseRelation(kFuseThrough);
-    if ((src == kBroadcast || src >= kCommReduce) && (sink >= kCommReduce))
-      return DNNFuseRelation(kFuseBreak);
-    return DNNFuseRelation(kFuseDepend);
-  }
-
-  bool IsThrough() const { return kind_ == kFuseThrough; }
-  bool IsBreak() const { return kind_ == kFuseBreak; }
-  bool IsDepend() const { return kind_ == kFuseDepend; }
-
-  const char* Name() const {
-    switch (kind_) {
-      case kFuseThrough: return "fuse_through";
-      case kFuseBreak:   return "fuse_break";
-      case kFuseDepend:  return "fuse_depend";
-    }
-    return "unknown";
-  }
-
- private:
-  explicit DNNFuseRelation(Kind kind) : kind_(kind) {}
-  Kind kind_;
-};
-
 /*!
  * \brief Find the element-wise node with the smallest output among unfused ops.
  *

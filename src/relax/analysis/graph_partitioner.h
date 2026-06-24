@@ -58,6 +58,57 @@ using support::LinkNode;
 int64_t StructInfoBytes(const StructInfo& sinfo);
 
 /*!
+ * \brief The DNNFusion-style fusion relation between a producer/consumer op pair.
+ *
+ * Classifies an ordered (src -> sink) op-pattern pair into one of three kinds
+ * that drive the bidirectional RunDNNFuse merge:
+ *  - kFuseBreak: the pair must not be fused. An opaque op on either side always
+ *    breaks; so does a broadcast/reduce/heavier producer feeding a
+ *    reduce-or-heavier consumer.
+ *  - kFuseThrough: the pair should be fused (an elementwise op on either side,
+ *    or injective-into-injective) -- unless an opaque op already forced a break.
+ *  - kFuseDepend: no decision on its own; defer to the surrounding planner.
+ *
+ * Defined inline here so the classifier is reachable from unit tests and the
+ * graph_partitioner translation unit alike.
+ */
+class DNNFuseRelation {
+ public:
+  enum Kind { kFuseThrough, kFuseBreak, kFuseDepend };
+  /*!
+   * \brief Classify the fusion relation between a source and a sink op pattern.
+   * \param src The pattern of the source (producer) op.
+   * \param sink The pattern of the sink (consumer) op.
+   * \return The classified relation.
+   */
+  static DNNFuseRelation Classify(OpPatternKind src, OpPatternKind sink) {
+    if (src == kOpaque || sink == kOpaque) return DNNFuseRelation(kFuseBreak);
+    if (src == kElemWise || sink == kElemWise) return DNNFuseRelation(kFuseThrough);
+    if (src == kInjective && sink == kInjective) return DNNFuseRelation(kFuseThrough);
+    if ((src == kBroadcast || src >= kCommReduce) && (sink >= kCommReduce))
+      return DNNFuseRelation(kFuseBreak);
+    return DNNFuseRelation(kFuseDepend);
+  }
+
+  bool IsThrough() const { return kind_ == kFuseThrough; }
+  bool IsBreak() const { return kind_ == kFuseBreak; }
+  bool IsDepend() const { return kind_ == kFuseDepend; }
+
+  const char* Name() const {
+    switch (kind_) {
+      case kFuseThrough: return "fuse_through";
+      case kFuseBreak: return "fuse_break";
+      case kFuseDepend: return "fuse_depend";
+    }
+    return "unknown";
+  }
+
+ private:
+  explicit DNNFuseRelation(Kind kind) : kind_(kind) {}
+  Kind kind_;
+};
+
+/*!
  * \brief Indexed data flow graph in forward direction.
  *  This is a temporary data structure used for operator fusion analysis.
  *
