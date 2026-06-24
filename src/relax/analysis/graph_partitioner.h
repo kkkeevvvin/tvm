@@ -250,6 +250,8 @@ class GraphPartitioner {
    *        the generated function.
    */
   const IndexedForwardGraph::Node* postpone_node_{nullptr};
+  /*! \brief The graph currently being processed by RunDNNFuse (for convexity queries). */
+  const IndexedForwardGraph* dnnf_graph_{nullptr};
   // Internal implementation of CheckPath
   template <typename F>
   bool CheckPath_(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink, F fcond);
@@ -334,6 +336,19 @@ class GraphPartitioner {
    */
   void RunDNNFuse(const IndexedForwardGraph& graph);
   /*!
+   * \brief Test whether adding \p extra to the group rooted at \p root keeps it convex.
+   *
+   * The DNNFuse path commits fusions as direct pairwise group unions instead of the
+   * post-dominator-based CommitFuse, so it must check convexity explicitly: a group is
+   * codegen-valid only if no node outside it lies on a path between two of its nodes.
+   * Reachability is evaluated over dnnf_graph_ (set by RunDNNFuse).
+   *
+   * \param extra The node proposed to join the group.
+   * \param root The current root of the seed's group.
+   * \return true if the merged node set has no external bypass node, false otherwise.
+   */
+  bool KeepsBlockConvex(IndexedForwardGraph::Node* extra, Group* root);
+  /*!
    * \brief Recursively fuse forward (successor) neighbours into sp's group.
    *
    * Implements RunDNNFuse's forward expansion (DNNFusion Listing 1
@@ -343,8 +358,9 @@ class GraphPartitioner {
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
-   * On success, CommitFuse(sp, successor) unions the groups along the walk, the
-   * successor is added to block, and expansion recurses into its successors.
+   * On success, sp's group is unioned directly into successor's group (a pairwise
+   * MergeFromTo, no post-dominator requirement), the successor is added to block,
+   * and expansion recurses into its successors.
    *
    * \param sp The seed node whose group is being extended.
    * \param successor The forward neighbour considered for fusion.
@@ -365,8 +381,9 @@ class GraphPartitioner {
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
-   * On success, CommitFuse(predecessor, sp) unions the groups along the walk, the
-   * predecessor is added to block, and expansion recurses into its predecessors.
+   * On success, predecessor's group is unioned directly into sp's group (a pairwise
+   * MergeFromTo, no post-dominator requirement), the predecessor is added to block,
+   * and expansion recurses into its predecessors.
    *
    * \param sp The seed node whose group is being extended.
    * \param predecessor The backward neighbour considered for fusion.

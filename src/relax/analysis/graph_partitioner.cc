@@ -525,13 +525,22 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
-  // check the constraint requirement
-  auto fcond = [](OpPatternKind kind, bool is_sink) {
-    if (is_sink) return kind <= kOutEWiseFusable;
-    return kind <= kInjective;
-  };
-  if (!CheckPath(sp, successor, fcond)) return;
-  CommitFuse(sp, successor);
+  // Pointwise admissibility of the directly-adjacent successor. DNNFusion expands
+  // one direct neighbour at a time, so there are no intermediate nodes on a path to
+  // validate -- this replaces CheckPath's sink condition without requiring successor
+  // to be a post-dominator of sp.
+  if (succ_pat > kOutEWiseFusable) return;
+  // Reject merges that would make the seed's block non-convex. CheckPath's
+  // post-dominator requirement used to guarantee convexity for free; here we test it
+  // directly so a non-post-dominating neighbour can still fuse when it is safe.
+  if (!KeepsBlockConvex(successor, groups_[sp->index]->FindRoot())) {
+    LOG(INFO) << "    skip: merge would break block convexity";
+    return;
+  }
+  // Commit the fusion as a direct pairwise union of the two groups (merging sp into
+  // successor's group, the consumer-as-root direction CommitFuse used). This replaces
+  // CommitFuse, which path-merges every node up to a post-dominator sink.
+  MergeFromTo(groups_[sp->index], groups_[successor->index]);
   block->insert(successor);
   // Recurse into the fused successor to extend the chain past one hop.
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
@@ -554,13 +563,22 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
-  // check the constraint requirement
-  auto fcond = [](OpPatternKind kind, bool is_sink) {
-    if (is_sink) return kind <= kOutEWiseFusable;
-    return kind <= kInjective;
-  };
-  if (!CheckPath(predecessor, sp, fcond)) return;
-  CommitFuse(predecessor, sp);
+  // Pointwise admissibility of the directly-adjacent predecessor. DNNFusion expands
+  // one direct neighbour at a time, so there are no intermediate nodes on a path to
+  // validate -- this replaces CheckPath's sink condition without requiring sp to be a
+  // post-dominator of predecessor.
+  if (pred_pat > kOutEWiseFusable) return;
+  // Reject merges that would make the seed's block non-convex. CheckPath's
+  // post-dominator requirement used to guarantee convexity for free; here we test it
+  // directly so a non-post-dominating neighbour can still fuse when it is safe.
+  if (!KeepsBlockConvex(predecessor, groups_[sp->index]->FindRoot())) {
+    LOG(INFO) << "    skip: merge would break block convexity";
+    return;
+  }
+  // Commit the fusion as a direct pairwise union of the two groups (merging predecessor
+  // into sp's group, the consumer-as-root direction CommitFuse used). This replaces
+  // CommitFuse, which path-merges every node up to a post-dominator sink.
+  MergeFromTo(groups_[predecessor->index], groups_[sp->index]);
   block->insert(predecessor);
   // Recurse into the fused predecessor to extend the chain past one hop.
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
@@ -568,7 +586,51 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   }
 }
 
+bool GraphPartitioner::KeepsBlockConvex(IndexedForwardGraph::Node* extra, Group* root) {
+  // Candidate fused set S = { n : FindRoot(n) == root } u { extra }. A node set is
+  // codegen-valid only if it is convex: no node outside S may lie on a path between two
+  // S nodes. Otherwise an intra-dataflow-block value has to cross the fused-function
+  // boundary, which Relax rejects ("Do not have a default for relax.expr.DataflowVar").
+  // Detect non-convexity by collecting the external nodes reachable forward from S and
+  // those that can reach S backward: any node in both forms a bypass S -> w -> S.
+  ICHECK(dnnf_graph_ != nullptr);
+  auto in_set = [&](IndexedForwardGraph::Node* n) {
+    return n == extra || groups_[n->index]->FindRoot() == root;
+  };
+  std::unordered_set<IndexedForwardGraph::Node*> desc;  // external nodes reachable from S
+  std::unordered_set<IndexedForwardGraph::Node*> anc;   // external nodes that reach S
+  std::vector<IndexedForwardGraph::Node*> stack;
+  // Forward sweep: seed from edges leaving S, never descending back into S.
+  for (auto* n : dnnf_graph_->post_dfs_order) {
+    if (!in_set(n)) continue;
+    for (auto* l = n->outputs.head; l != nullptr; l = l->next)
+      if (!in_set(l->value.node)) stack.push_back(l->value.node);
+  }
+  while (!stack.empty()) {
+    auto* n = stack.back();
+    stack.pop_back();
+    if (in_set(n) || !desc.insert(n).second) continue;
+    for (auto* l = n->outputs.head; l != nullptr; l = l->next) stack.push_back(l->value.node);
+  }
+  // Backward sweep: seed from edges entering S, never ascending back into S.
+  for (auto* n : dnnf_graph_->post_dfs_order) {
+    if (!in_set(n)) continue;
+    for (auto* l = n->inputs.head; l != nullptr; l = l->next)
+      if (!in_set(l->value.node)) stack.push_back(l->value.node);
+  }
+  while (!stack.empty()) {
+    auto* n = stack.back();
+    stack.pop_back();
+    if (in_set(n) || !anc.insert(n).second) continue;
+    for (auto* l = n->inputs.head; l != nullptr; l = l->next) stack.push_back(l->value.node);
+  }
+  for (auto* n : desc)
+    if (anc.count(n)) return false;
+  return true;
+}
+
 void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
+  dnnf_graph_ = &graph;
   graph.DebugDump();
   // unfused_ops = all_operaters
   std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
