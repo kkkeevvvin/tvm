@@ -360,6 +360,19 @@ TVM_DLL Pass AnnotateTIROpPattern();
 TVM_DLL Pass FuseOps(int fuse_opt_level = -1);
 
 /*!
+ * \brief Like \ref FuseOps, this pass groups bindings in a dataflow block of Relax functions and
+ * generates a new grouped Relax function for each group, but it drives the grouping with the
+ * DNNFusion-based fusion algorithm instead of the default 3-phase dominator-tree partitioner.
+ * Rather than partitioning along the dominator tree, RunDNNFuse seeds from element-wise ops and
+ * bidirectionally expands each seed into its successors and predecessors, deciding each merge from
+ * the mathematical-property relation between the op pair (see DNNFuseRelation).
+ *
+ * A follow-up pass named "FuseTIR" will generate a TIR PrimFunc for each grouped function.
+ * \return The Pass.
+ */
+TVM_DLL Pass DnnfFuseOps();
+
+/*!
  * \brief The pattern object used as the input of FuseOpsByPattern. For bindings to be
  * fused, it needs to be matched with `pattern` and the `check` function needs to return
  * true.

@@ -37,6 +37,7 @@ from .transform import (
     DeadCodeElimination,
     DecomposeOpsForInference,
     DecomposeOpsForTraining,
+    DnnfFuseOps,
     EliminateCommonSubexpr,
     ExpandMatmulOfSum,
     ExpandTupleArguments,

@@ -809,6 +809,26 @@ def FuseOps(fuse_opt_level=-1) -> tvm.ir.transform.Pass:
     return _ffi_api.FuseOps(fuse_opt_level)  # type: ignore
 
 
+def DnnfFuseOps() -> tvm.ir.transform.Pass:
+    """Like :py:func:`FuseOps`, this pass groups bindings in a dataflow block of Relax functions
+    and generates a new grouped Relax function for each group, substituting the bindings with calls
+    to the new grouped functions. The difference is the grouping algorithm: instead of the default
+    3-phase dominator-tree fusion, it drives grouping with the DNNFusion-based RunDNNFuse algorithm,
+    which seeds from element-wise ops and bidirectionally expands each seed into its successors and
+    predecessors, deciding each merge from the mathematical-property relation between the op pair.
+
+    A follow-up pass named "FuseTIR" will generate a TIR PrimFunc for each grouped function.
+
+    Note: ConvertToDataflow may need to be called first to provide dataflow blocks.
+
+    Returns
+    -------
+    ret : tvm.transform.Pass
+        The registered pass for DNNFusion-based operator fusion.
+    """
+    return _ffi_api.DnnfFuseOps()  # type: ignore
+
+
 def FuseTIR() -> tvm.ir.transform.Pass:
     """Fuse primitive relax function into a larger TIR function if possible
 

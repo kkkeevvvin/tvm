@@ -97,7 +97,12 @@ using support::LinkNode;
 
 constexpr uint32_t kMaxFusedOps = 256;
 
+/*! \brief opt_level that routes GraphPartitioner::Partition to the DNNFusion-based
+ *  RunDNNFuse path instead of the default 3-phase RunFuse pipeline. */
+constexpr int kDnnfFuseOptLevel = 6;
+
 TVM_REGISTER_PASS_CONFIG_OPTION("relax.FuseOps.max_depth", Integer);
+TVM_REGISTER_PASS_CONFIG_OPTION("relax.DnnfFuseOps.max_depth", Integer);
 
 int64_t StructInfoBytes(const StructInfo& sinfo) {
   if (const auto* tensor_sinfo = sinfo.as<TensorStructInfoNode>()) {
@@ -1496,6 +1501,24 @@ Pass FuseOps(int fuse_opt_level) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("relax.transform.FuseOps", FuseOps);
+}
+
+Pass DnnfFuseOps() {
+  auto pass_func =  //
+      [=](IRModule m, PassContext pc) {
+        auto max_fuse_depth = pc->GetConfig("relax.DnnfFuseOps.max_depth", Integer(kMaxFusedOps));
+        // kDnnfFuseOptLevel selects the DNNFusion-based RunDNNFuse partition path.
+        return relax::FuseOps(m, kDnnfFuseOptLevel, max_fuse_depth.value().IntValue());
+      };
+  return CreateModulePass(/*pass_function=*/pass_func,  //
+                          /*opt_level=*/0,              //
+                          /*name=*/"DnnfFuseOps",       //
+                          /*required=*/{});
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("relax.transform.DnnfFuseOps", DnnfFuseOps);
 }
 
 Pass FuseOpsByPattern(const tvm::ffi::Array<FusionPattern>& patterns, bool bind_constants,
