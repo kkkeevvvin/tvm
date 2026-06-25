@@ -191,3 +191,99 @@ TEST(RunDNNFusePredecessor, StopsAtOpaqueSource) {
   auto groups = b.RunDNNFuse();
   EXPECT_FALSE(SameGroup(groups, n1, n0));
 }
+
+// --- Diamond / multi-output topologies ------------------------------------
+//
+// The chain tests above keep every node single-input/single-output, so
+// CheckPath_ / CommitFuse_ never recurse over branches. These exercise the
+// forward (and backward) cone walk where a node fans out to -- or joins from --
+// more than one neighbour.
+//
+// An all-element-wise diamond fuses into a single group. The seed has two
+// outgoing edges: CommitFuse(seed, branch) merges the path to that branch, then
+// FuseSuccessor recurses into the branch's outputs, so the join is reached and
+// fused through both branches. The multi-output cone walk in CheckPath_ /
+// CommitFuse_ (now restricted to the path to each sink) is what is under test.
+//
+//        n0 (seed)
+//        /      \
+//      n1        n2
+//        \      /
+//          n3 (join)
+
+TEST(RunDNNFuseSuccessor, DiamondAllElemWiseFusesEntirely) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kElemWise, 10);  // smallest output -> seed
+  auto* n1 = b.AddNode(kElemWise, 20);
+  auto* n2 = b.AddNode(kElemWise, 30);
+  auto* n3 = b.AddNode(kElemWise, 40);
+  b.AddEdge(n0, n1);
+  b.AddEdge(n0, n2);
+  b.AddEdge(n1, n3);
+  b.AddEdge(n2, n3);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_TRUE(SameGroup(groups, n0, n1));
+  EXPECT_TRUE(SameGroup(groups, n0, n2));
+  EXPECT_TRUE(SameGroup(groups, n0, n3));
+}
+
+// Same diamond, but the join is opaque. CheckPath / CommitFuse restrict the cone
+// walk to the path that actually terminates at the sink, so fusing seed->branch
+// no longer inspects (or pulls in) the opaque join reachable through the *sibling*
+// branch: seed->n1 only sees n1, seed->n2 only sees n2. Both branches classify as
+// through and fuse, so the element-wise body {n0,n1,n2} collapses into one group
+// while the opaque join n3 -- left out as a downstream consumer -- stays separate.
+// The resulting partition is still convex (n3 only consumes from the group, never
+// feeds back), which is why excluding it is legal.
+//
+//        n0 (seed)
+//        /      \
+//      n1        n2
+//        \      /
+//        n3 (opaque join)
+
+TEST(RunDNNFuseSuccessor, DiamondOpaqueJoinFusesElemWiseBody) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kElemWise, 10);  // seed
+  auto* n1 = b.AddNode(kElemWise, 20);
+  auto* n2 = b.AddNode(kElemWise, 30);
+  auto* n3 = b.AddNode(kOpaque, 40);  // opaque join, excluded as a downstream consumer
+  b.AddEdge(n0, n1);
+  b.AddEdge(n0, n2);
+  b.AddEdge(n1, n3);
+  b.AddEdge(n2, n3);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_TRUE(SameGroup(groups, n0, n1));
+  EXPECT_TRUE(SameGroup(groups, n0, n2));
+  EXPECT_TRUE(SameGroup(groups, n1, n2));
+  EXPECT_FALSE(SameGroup(groups, n0, n3));
+}
+
+// The backward mirror: a diamond whose join is the seed, so FusePredecessor
+// walks back through the join's two incoming edges (and the recursion fans out
+// over the producers' inputs). All element-wise -> the diamond fuses entirely.
+//
+//           n0
+//        /      \
+//      n1        n2
+//        \      /
+//        n3 (seed)
+
+TEST(RunDNNFusePredecessor, DiamondSeedAtJoinFusesEntirely) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kElemWise, 40);
+  auto* n1 = b.AddNode(kElemWise, 30);
+  auto* n2 = b.AddNode(kElemWise, 20);
+  auto* n3 = b.AddNode(kElemWise, 5);  // smallest output -> seed; the join node
+  b.AddEdge(n0, n1);
+  b.AddEdge(n0, n2);
+  b.AddEdge(n1, n3);
+  b.AddEdge(n2, n3);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_TRUE(SameGroup(groups, n3, n1));
+  EXPECT_TRUE(SameGroup(groups, n3, n2));
+  EXPECT_TRUE(SameGroup(groups, n3, n0));
+}
