@@ -347,6 +347,16 @@ TVM_DLL Pass RemoveUnusedOutputs();
 TVM_DLL Pass AnnotateTIROpPattern();
 
 /*!
+ * \brief Annotate the DNNFusion Table 2 MappingType for TIR functions, classified
+ * directly from the call_tir callee's operator name rather than derived from OpPatternKind.
+ * \note It is an auto-detect pass for call_tir callees whose op name is not covered by the
+ *       lookup table, the mapping_type will be "opaque" if we can't classify it. Users can
+ *       manually annotate the attr `mapping_type` to prim_func.
+ * \return The Pass.
+ */
+TVM_DLL Pass AnnotateTIROpMappingType();
+
+/*!
  * \brief This pass groups bindings in a dataflow block of Relax functions and generates a new
  * grouped Relax function for each group, according to the fusion algorithm described in the pass
  * implementation. By grouping bindings into new Relax functions, we substitute the bindings in the

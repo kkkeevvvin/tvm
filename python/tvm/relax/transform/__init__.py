@@ -20,6 +20,7 @@ from .transform import (
     AdjustMatmulOrder,
     AllocateWorkspace,
     AlterOpImpl,
+    AnnotateTIROpMappingType,
     AnnotateTIROpPattern,
     AttachAttrLayoutFreeBuffers,
     AttachGlobalSymbol,
