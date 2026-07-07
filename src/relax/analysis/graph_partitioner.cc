@@ -27,40 +27,17 @@ namespace tvm {
 namespace relax {
 
 namespace {
-enum class DNNFuseRelation {
-  kFuseThrough,
-  kFuseBreak,
-  kFuseDepend,
-};
-
-const char* DNNFuseRelationName(DNNFuseRelation relation) {
-  switch (relation) {
-    case DNNFuseRelation::kFuseThrough:
-      return "fuse_through";
-    case DNNFuseRelation::kFuseBreak:
-      return "fuse_break";
-    case DNNFuseRelation::kFuseDepend:
-      return "fuse_depend";
-  }
-  return "unknown";
-}
-
-DNNFuseRelation ClassifyDNNFuseRelation(OpPatternKind src, OpPatternKind sink) {
-  if (src == kOutEWiseFusable && (sink == kBroadcast || sink == kInjective)) {
-    return DNNFuseRelation::kFuseDepend;
-  }
-  if (src == kCommReduce && (sink == kBroadcast || sink == kInjective)) {
-    return DNNFuseRelation::kFuseDepend;
-  }
-  if (src == kBroadcast && sink == kInjective) {
-    return DNNFuseRelation::kFuseDepend;
-  }
-  if (src > kBroadcast && sink > kBroadcast) {
-    return DNNFuseRelation::kFuseBreak;
-  }
-  return DNNFuseRelation::kFuseThrough;
-}
-
+/*!
+ * \brief Find the element-wise node with the smallest output among unfused ops.
+ *
+ * Considers only nodes whose pattern is kElemWise and whose output_size is
+ * known (non-negative), and returns the one with the smallest output_size.
+ * Ties are broken by the smaller node index to keep the selection deterministic.
+ *
+ * \param unfused_ops The set of candidate nodes that have not been fused yet.
+ * \return The matching node with the minimum output size, or nullptr if no
+ *         eligible element-wise node exists.
+ */
 IndexedForwardGraph::Node* FindMinElemWise(
     const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
@@ -188,10 +165,10 @@ bool GraphPartitioner::CheckPath_(IndexedForwardGraph::Node* src, IndexedForward
                                   F fcond) {
   if (visited_.count(src)) return true;
   visited_.insert(src);
-  Group* group = groups_[src->index];
-  ICHECK(group != nullptr);
-  group = group->FindRoot();
-  if (!fcond(group->pattern, src == sink)) return false;
+  Group* gnode = groups_[src->index];
+  ICHECK(gnode != nullptr);
+  gnode = gnode->FindRoot();
+  if (!fcond(gnode->pattern, src == sink)) return false;
   if (src == sink) return true;
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     if (!CheckPath_(link->value.node, sink, fcond)) return false;
@@ -244,10 +221,10 @@ void GraphPartitioner::CommitFuse_(IndexedForwardGraph::Node* src, IndexedForwar
   if (src == sink) return;
   if (visited_.count(src)) return;
   visited_.insert(src);
-  Group* group = groups_[src->index];
-  ICHECK(group != nullptr);
+  Group* gnode = groups_[src->index];
+  ICHECK(gnode != nullptr);
   // merge the current group to the parent if possible.
-  MergeFromTo(group, target);
+  MergeFromTo(gnode, target);
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     CommitFuse_(link->value.node, sink, target);
   }
@@ -260,21 +237,13 @@ void GraphPartitioner::CommitFuse(IndexedForwardGraph::Node* src, IndexedForward
   CommitFuse_(src, sink, target);
 }
 
-template <typename F>
-void GraphPartitioner::TryFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink,
-                               F fcond) {
-  if (CheckPath(src, sink, fcond)) {
-    CommitFuse(src, sink);
-  }
-}
-
 size_t GraphPartitioner::CountNodesUptoSink_(IndexedForwardGraph::Node* src,
                                              IndexedForwardGraph::Node* sink) {
   if (src == sink || visited_.count(src)) return 0;
   visited_.insert(src);
-  Group* group = groups_[src->index];
-  ICHECK(group != nullptr);
-  auto sum = group->num_nodes;
+  Group* gnode = groups_[src->index];
+  ICHECK(gnode != nullptr);
+  auto sum = gnode->num_nodes;
   for (auto link = src->outputs.head; link != nullptr; link = link->next) {
     sum += CountNodesUptoSink_(link->value.node, sink);
   }
@@ -292,10 +261,10 @@ size_t GraphPartitioner::CountFusedNodesWithNewChild(IndexedForwardGraph::Node* 
 size_t GraphPartitioner::CountArgs_(IndexedForwardGraph::Node* src,
                                     const IndexedForwardGraph& graph, bool update_postpone) {
   std::unordered_set<Group*> visited_groups;
-  Group* group = groups_[src->index];
-  ICHECK(group != nullptr);
-  auto sum = group->args_num;
-  visited_groups.insert(group->FindRoot());
+  Group* gnode = groups_[src->index];
+  ICHECK(gnode != nullptr);
+  auto sum = gnode->args_num;
+  visited_groups.insert(gnode->FindRoot());
   auto calc_args_number = [this, src, &graph, &visited_groups,
                            update_postpone](const Expr& arg) -> size_t {
     if (arg.as<VarNode>()) return 0;
@@ -373,103 +342,15 @@ void GraphPartitioner::InitGroups(const IndexedForwardGraph& graph) {
   groups_.resize(graph.post_dfs_order.size());
   for (size_t nid = 0; nid < groups_.size(); ++nid) {
     const auto* graph_node = graph.post_dfs_order[nid];
-    auto* group = arena_->make<Group>();
-    group->pattern = graph_node->pattern;
-    group->root_ref = graph_node->ref;
+    auto* group_node = arena_->make<Group>();
+    group_node->pattern = graph_node->pattern;
+    group_node->root_ref = graph_node->ref;
     // set anchor ref if necessary.
-    if (group->pattern == kOutEWiseFusable) {
-      group->anchor_ref = graph_node->ref;
+    if (group_node->pattern == kOutEWiseFusable) {
+      group_node->anchor_ref = graph_node->ref;
     }
-    group->args_num = args_counter(graph_node->ref);
-    groups_[nid] = group;
-  }
-}
-
-void GraphPartitioner::ProcessPostponedFusing(IndexedForwardGraph::Node* graph_node,
-                                              const IndexedForwardGraph& graph,
-                                              const DominatorTree& post_dom_tree) {
-  if (!postponed_fusing_map_.count(graph_node)) return;
-  auto range = postponed_fusing_map_.equal_range(graph_node);
-  for (auto it = range.first; it != range.second; ++it) {
-    // If the number of arguments is less than the limit then the input can be fused
-    if (CountArgs_(graph_node, graph, false) <= CountArgsLimit_(graph_node)) {
-      auto* src = it->second;
-      auto* snode = post_dom_tree.nodes[src->index]->parent->gnode;
-      if (groups_[snode->index]->anchor_ref != nullptr) continue;
-      CommitFuse(src, snode);
-    }
-  }
-  postponed_fusing_map_.erase(graph_node);
-}
-
-void GraphPartitioner::FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_node,
-                                              Group* group, DominatorTree::Node* dom_node,
-                                              size_t dom_parent_index) {
-  if (group->pattern > kInjective) return;
-  Group* dom_parent_group = groups_[dom_parent_index];
-  Group* dom_root_group = dom_parent_group->FindRoot();
-  // If dom node group has a tuple as its root, we do not fuse tuple fields into it
-  if (dom_root_group->pattern == kTuple) return;
-  if (dom_parent_group->pattern == kTuple && dom_root_group->pattern <= kInjective) {
-    // Now we know the tuple has been fused into subsequent injective ops.
-    // dom_root_group can also be tuple, as in inception layers — TryFuse's
-    // CheckPath is needed to avoid fusing two intermediate tuples.
-    auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
-    TryFuse(graph_node, dom_node->parent->gnode, fcond);
-  }
-}
-
-void GraphPartitioner::FuseToPostDominator(IndexedForwardGraph::Node* graph_node,
-                                           Group* group, DominatorTree::Node* dom_node,
-                                           size_t dom_parent_index, int phase) {
-  // dom_node->parent and its gnode are guaranteed non-null by RunFuse's caller-side guard.
-  IndexedForwardGraph::Node* dom_parent_gnode = dom_node->parent->gnode;
-  ICHECK(dom_parent_gnode != nullptr);
-
-  // Skip if current node is already fused to the parent.
-  if (groups_[dom_parent_index] != nullptr &&
-      group->FindRoot() == groups_[dom_parent_index]->FindRoot()) {
-    return;
-  }
-  // Do not fuse into tuple for now.
-  if (groups_[dom_parent_index]->pattern == kTuple) return;
-
-  switch (group->pattern) {
-    case kOutEWiseFusable: {
-      // OutEWiseFusable (e.g. conv2d) fuses in phase 0, only when the dominator
-      // relation is elemwise and all intermediate ops are still broadcast.
-      if (phase != 0) return;
-      if (dom_node->pattern != kElemWise) return;
-      auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; };
-      TryFuse(graph_node, dom_parent_gnode, fcond);
-      return;
-    }
-    case kElemWise:
-    case kBroadcast: {
-      // Elemwise/broadcast can fuse to an injective or reduction parent.
-      // Intermediate ops on parallel branches stay <= injective; the sink may
-      // already be fused to a kOutEWiseFusable / kCommReduce / kInjective anchor.
-      if (dom_node->pattern > kInjective && dom_node->pattern != kCommReduce) return;
-      auto fcond = [](OpPatternKind kind, bool is_sink) {
-        if (!is_sink) return kind <= kInjective;
-        return kind <= kBroadcast || kind == kCommReduce || kind == kInjective ||
-               kind == kOutEWiseFusable;
-      };
-      TryFuse(graph_node, dom_parent_gnode, fcond);
-      return;
-    }
-    case kInjective:
-    case kTuple: {
-      // Deferred to phase 1 so conv2d (phase 0) finishes fusing first.
-      if (phase != 1) return;
-      auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
-      TryFuse(graph_node, dom_parent_gnode, fcond);
-      return;
-    }
-    case kCommReduce:
-      return;
-    default:
-      LOG(FATAL) << "FuseToPostDominator: unexpected pattern " << group->pattern;
+    group_node->args_num = args_counter(graph_node->ref);
+    groups_[nid] = group_node;
   }
 }
 
@@ -480,18 +361,29 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     // the group of current node has been specified already.
     auto* graph_node = graph.post_dfs_order[nid];
     auto* dom_node = post_dom_tree.nodes[nid];
-    Group* group = groups_[nid];
-    ICHECK(group != nullptr);
+    Group* group_node = groups_[nid];
+    ICHECK(group_node != nullptr);
     postpone_node_ = nullptr;
-
-    ProcessPostponedFusing(graph_node, graph, post_dom_tree);
-
+    // Check if the fusing of some inputs was postponed
+    if (postponed_fusing_map_.count(graph_node)) {
+      auto range = postponed_fusing_map_.equal_range(graph_node);
+      for (auto it = range.first; it != range.second; ++it) {
+        // If the number of arguments is less than the limit then the input can be fused
+        if (CountArgs_(graph_node, graph, false) <= CountArgsLimit_(graph_node)) {
+          auto* src = it->second;
+          auto* snode = post_dom_tree.nodes[src->index]->parent->gnode;
+          if (groups_[snode->index]->anchor_ref != nullptr) continue;
+          CommitFuse(src, snode);
+        }
+      }
+      postponed_fusing_map_.erase(graph_node);
+    }
     // no actions for opaque nodes
-    if (group->pattern == kOpaque) continue;
+    if (group_node->pattern == kOpaque) continue;
     // no actions needed if the current node have no dominator
     if (dom_node->parent == nullptr) continue;
     ICHECK(!graph_node->extern_ref);
-    size_t dom_parent_index = dom_node->parent->gnode->index;
+    size_t dom_parent_gindex = dom_node->parent->gnode->index;
 
     // refuse the fusion if too many ops are going to be fused together
     if (CountFusedNodesWithNewChild(graph_node, dom_node->parent->gnode) > max_fuse_depth_)
@@ -499,17 +391,85 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
     // Refuse the fusion if too many arguments are going to be in the fused function
     if (max_function_args_ > 0) {
       auto limit = CountArgsLimit_(graph_node);
-      if (limit > 0 && CountFusedArgs(graph, graph_node) > limit) {
-        continue;
+      if (limit > 0) {
+        if (CountFusedArgs(graph, graph_node) > limit) {
+          continue;
+        }
       }
     }
 
     if (phase == 2) {
-      FuseInjectiveIntoTuple(graph_node, group, dom_node, dom_parent_index);
+      // Fuse injective ops into intermediate tuples, if any
+      if (group_node->pattern > kInjective) continue;
+      Group* dom_parent_group = groups_[dom_parent_gindex];
+      Group* dom_root_group = dom_parent_group->FindRoot();
+      // If dom node group has a tuple as its root, we do not fuse tuple fields into it
+      if (dom_root_group->pattern == kTuple) continue;
+      if (dom_parent_group->pattern == kTuple && dom_root_group->pattern <= kInjective) {
+        // Now we know the tuple has been fused into subsequent injective ops
+        auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
+        // dom_root_group can also be tuple, as in inception layers
+        // CheckPath is needed to avoid fusing two intermediate tuples
+        if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
+          CommitFuse(graph_node, dom_node->parent->gnode);
+        }
+      }
       continue;
     }
 
-    FuseToPostDominator(graph_node, group, dom_node, dom_parent_index, phase);
+    // Skip if current node is already fused to the parent.
+    if (groups_[dom_parent_gindex] != nullptr &&
+        group_node->FindRoot() == groups_[dom_parent_gindex]->FindRoot()) {
+      continue;
+    }
+    // Do not fuse into tuple for now
+    if (groups_[dom_parent_gindex]->pattern == kTuple) continue;
+    // Try to fuse current node to its post-dominator.
+    if (group_node->pattern == kOutEWiseFusable) {
+      if (phase != 0) continue;
+      // Path for OutEWiseFusable: conv2d
+      // Check if the dominator relation is elemwise.
+      if (dom_node->parent != nullptr && dom_node->pattern == kElemWise) {
+        ICHECK(dom_node->parent->gnode != nullptr);
+        // The fuse can be executed if all the intermediate ops are still broadcast.
+        auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kBroadcast; };
+        if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
+          CommitFuse(graph_node, dom_node->parent->gnode);
+        }
+      }
+    } else if (group_node->pattern <= kBroadcast) {
+      // Pre-condition: can only be fused to parent which is injective or reduction.
+      if (dom_node->parent != nullptr &&
+          (dom_node->pattern <= kInjective || dom_node->pattern == kCommReduce)) {
+        // Check if all the intermediate ops are still broadcast.
+        // The final terminal node can already be fused to a OutEWiseFusable group.
+        auto fcond = [](OpPatternKind kind, bool is_sink) {
+          if (!is_sink) {
+            // Elemwise, broadcast, and injective ops on the parallel branches
+            // are allowed be fused to the elemwise/broadcast anchor.
+            return kind <= kInjective;
+          } else {
+            return (kind <= kBroadcast || kind == kCommReduce || kind == kInjective ||
+                    kind == kOutEWiseFusable);
+          }
+        };
+        if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
+          CommitFuse(graph_node, dom_node->parent->gnode);
+        }
+      }
+    } else if (group_node->pattern == kInjective || group_node->pattern == kTuple) {
+      // defer injective fusion to second phase.
+      // so conv2d always finishes fusing.
+      if (phase != 1) continue;
+      // Check if all path are injective.
+      auto fcond = [](OpPatternKind kind, bool is_sink) { return kind <= kInjective; };
+      if (CheckPath(graph_node, dom_node->parent->gnode, fcond)) {
+        CommitFuse(graph_node, dom_node->parent->gnode);
+      }
+    } else {
+      // do nothing.
+      ICHECK(group_node->pattern == kCommReduce);
+    }
   }
 }
 
@@ -522,12 +482,12 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
-  DNNFuseRelation relation = ClassifyDNNFuseRelation(sp_pat, succ_pat);
-  LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
+  DNNFuseRelation relation = DNNFuseRelation::Classify(sp_pat, succ_pat);
+  LOG(INFO) << "    relation = " << relation.Name();
   // return if successor can not be fused
-  if (relation == DNNFuseRelation::kFuseBreak) return;
-  // Temporarily reject ambiguous relations until the profitability oracle lands.
-  if (relation == DNNFuseRelation::kFuseDepend) return;
+  if (relation.IsBreak()) return;
+  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
+  if (relation.IsDepend()) return;
   // check the constraint requirement
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
@@ -536,6 +496,7 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   if (!CheckPath(sp, successor, fcond)) return;
   CommitFuse(sp, successor);
   block->insert(successor);
+  // Recurse into the fused successor to extend the chain past one hop.
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
     FuseSuccessor(successor, link->value.node, block);
   }
@@ -545,19 +506,17 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
                                        IndexedForwardGraph::Node* predecessor,
                                        std::unordered_set<IndexedForwardGraph::Node*>* block) {
   LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
-            << " node[" << predecessor->index << "] "
-            << ffi::GetRef<ObjectRef>(predecessor->ref)
-            << " (pattern=" << predecessor->pattern
-            << ", bytes=" << predecessor->output_size << ")";
+            << " node[" << predecessor->index << "] " << ffi::GetRef<ObjectRef>(predecessor->ref)
+            << " (pattern=" << predecessor->pattern << ", bytes=" << predecessor->output_size << ")";
   // check the mapping relationship
   OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
   OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
-  DNNFuseRelation relation = ClassifyDNNFuseRelation(pred_pat, sp_pat);
-  LOG(INFO) << "    relation = " << DNNFuseRelationName(relation);
+  DNNFuseRelation relation = DNNFuseRelation::Classify(pred_pat, sp_pat);
+  LOG(INFO) << "    relation = " << relation.Name();
   // return if predecessor can not be fused
-  if (relation == DNNFuseRelation::kFuseBreak) return;
-  // Temporarily reject ambiguous relations until the profitability oracle lands.
-  if (relation == DNNFuseRelation::kFuseDepend) return;
+  if (relation.IsBreak()) return;
+  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
+  if (relation.IsDepend()) return;
   // check the constraint requirement
   auto fcond = [](OpPatternKind kind, bool is_sink) {
     if (is_sink) return kind <= kOutEWiseFusable;
@@ -566,6 +525,7 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   if (!CheckPath(predecessor, sp, fcond)) return;
   CommitFuse(predecessor, sp);
   block->insert(predecessor);
+  // Recurse into the fused predecessor to extend the chain past one hop.
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
     FusePredecessor(predecessor, link->value.node, block);
   }

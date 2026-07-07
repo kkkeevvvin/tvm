@@ -26,6 +26,7 @@
 #define TVM_RELAX_ANALYSIS_GRAPH_PARTITIONER_H_
 
 #include <tvm/relax/op_attr_types.h>
+#include <tvm/relax/struct_info.h>
 #include <tvm/relax/type.h>
 
 #include <unordered_map>
@@ -39,6 +40,73 @@ namespace relax {
 
 using support::LinkedList;
 using support::LinkNode;
+
+/*!
+ * \brief Compute the size in bytes of a value with the given struct info.
+ *
+ * Tensors contribute (product of static shape dims) * dtype bytes; tuples are
+ * the sum of their fields. Returns -1 (the "unknown / dynamic / opaque"
+ * sentinel) when any tensor has a non-static shape, a non-integer dim, or the
+ * struct info is neither a tensor nor a tuple of computable fields.
+ *
+ * Defined in src/relax/transform/fuse_ops.cc; declared here so it is reachable
+ * from unit tests and other analysis code.
+ *
+ * \param sinfo The struct info to measure.
+ * \return The total byte size, or -1 if it cannot be determined statically.
+ */
+int64_t StructInfoBytes(const StructInfo& sinfo);
+
+/*!
+ * \brief The DNNFusion-style fusion relation between a producer/consumer op pair.
+ *
+ * Classifies an ordered (src -> sink) op-pattern pair into one of three kinds
+ * that drive the bidirectional RunDNNFuse merge:
+ *  - kFuseBreak: the pair must not be fused. An opaque op on either side always
+ *    breaks; so does a broadcast/reduce/heavier producer feeding a
+ *    reduce-or-heavier consumer.
+ *  - kFuseThrough: the pair should be fused (an elementwise op on either side,
+ *    or injective-into-injective) -- unless an opaque op already forced a break.
+ *  - kFuseDepend: no decision on its own; defer to the surrounding planner.
+ *
+ * Defined inline here so the classifier is reachable from unit tests and the
+ * graph_partitioner translation unit alike.
+ */
+class DNNFuseRelation {
+ public:
+  enum Kind { kFuseThrough, kFuseBreak, kFuseDepend };
+  /*!
+   * \brief Classify the fusion relation between a source and a sink op pattern.
+   * \param src The pattern of the source (producer) op.
+   * \param sink The pattern of the sink (consumer) op.
+   * \return The classified relation.
+   */
+  static DNNFuseRelation Classify(OpPatternKind src, OpPatternKind sink) {
+    if (src == kOpaque || sink == kOpaque) return DNNFuseRelation(kFuseBreak);
+    if (src == kElemWise || sink == kElemWise) return DNNFuseRelation(kFuseThrough);
+    if (src == kInjective && sink == kInjective) return DNNFuseRelation(kFuseThrough);
+    if ((src == kBroadcast || src >= kCommReduce) && (sink >= kCommReduce))
+      return DNNFuseRelation(kFuseBreak);
+    return DNNFuseRelation(kFuseDepend);
+  }
+
+  bool IsThrough() const { return kind_ == kFuseThrough; }
+  bool IsBreak() const { return kind_ == kFuseBreak; }
+  bool IsDepend() const { return kind_ == kFuseDepend; }
+
+  const char* Name() const {
+    switch (kind_) {
+      case kFuseThrough: return "fuse_through";
+      case kFuseBreak: return "fuse_break";
+      case kFuseDepend: return "fuse_depend";
+    }
+    return "unknown";
+  }
+
+ private:
+  explicit DNNFuseRelation(Kind kind) : kind_(kind) {}
+  Kind kind_;
+};
 
 /*!
  * \brief Indexed data flow graph in forward direction.
@@ -74,7 +142,7 @@ class IndexedForwardGraph {
     int64_t output_size{-1};
     /*! \brief The outputs of the node. */
     LinkedList<Edge> outputs;
-    /*! \brief The inputs of the node. */
+    /*! \brief The inputs of the node.  */
     LinkedList<Edge> inputs;
   };
   /*! \brief The node map that maps node to graph */
@@ -287,10 +355,6 @@ class GraphPartitioner {
    */
   void CommitFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
 
-  // If every path from src to sink satisfies fcond, commit the fusion.
-  template <typename F>
-  void TryFuse(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink, F fcond);
-
   size_t CountNodesUptoSink_(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink);
   // Calculate the number of arguments for the node.
   size_t CountArgs_(IndexedForwardGraph::Node* src, const IndexedForwardGraph& graph,
@@ -324,24 +388,58 @@ class GraphPartitioner {
   // execute the fusion algorithm.
   void RunFuse(const IndexedForwardGraph& graph, const DominatorTree& post_dom_tree, int phase);
 
-  // Flush any inputs whose fusion was deferred until graph_node was reached.
-  void ProcessPostponedFusing(IndexedForwardGraph::Node* graph_node,
-                              const IndexedForwardGraph& graph,
-                              const DominatorTree& post_dom_tree);
-
-  // Phase-2 rule: fuse injective ops into intermediate tuples.
-  void FuseInjectiveIntoTuple(IndexedForwardGraph::Node* graph_node, Group* group,
-                              DominatorTree::Node* dom_node, size_t dom_parent_index);
-
-  // Phase-0/1 rule: try to fuse graph_node into its post-dominator parent.
-  void FuseToPostDominator(IndexedForwardGraph::Node* graph_node, Group* group,
-                           DominatorTree::Node* dom_node, size_t dom_parent_index,
-                           int phase);
-
-  // test
+  /*!
+   * \brief Execute the DNNFusion-based fusion algorithm.
+   *
+   * Alternative fusion path selected when opt_level_ == 6 (driven from Python
+   * via relax.transform.FuseOps(fuse_opt_level=6)), replacing the default
+   * 3-phase RunFuse pipeline. Instead of the dominator-tree-based grouping, it
+   * works directly off the cached pattern / output_size on each
+   * IndexedForwardGraph::Node, seeding from element-wise ops and expanding into
+   * successors / predecessors.
+   *
+   * \param graph The indexed forward graph to fuse over.
+   */
   void RunDNNFuse(const IndexedForwardGraph& graph);
+  /*!
+   * \brief Recursively fuse forward (successor) neighbours into sp's group.
+   *
+   * Implements RunDNNFuse's forward expansion (DNNFusion Listing 1
+   * Step 2.1-2.3), walking Node::outputs along the data path sp -> successor.
+   * The successor is merged into sp's group based on DNNFuseRelation::Classify of
+   * the two groups' root patterns:
+   *   - kFuseBreak: reject the fusion outright.
+   *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
+   *   - kFuseThrough: fuse.
+   * On success, CommitFuse(sp, successor) unions the groups along the walk, the
+   * successor is added to block, and expansion recurses into its successors.
+   *
+   * \param sp The seed node whose group is being extended.
+   * \param successor The forward neighbour considered for fusion.
+   * \param block The accumulating set of nodes fused into the seed's block.
+   */
   void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
                      std::unordered_set<IndexedForwardGraph::Node*>* block);
+  /*!
+   * \brief Recursively fuse backward (predecessor) neighbours into sp's group.
+   *
+   * The backward mirror of FuseSuccessor. 
+   *
+   * Implements RunDNNFuse's backward expansion (DNNFusion Listing 1 Step 2.1-2.3),
+   * walking Node::inputs instead of Node::outputs, along the data path 
+   * predecessor -> sp.
+   * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
+   * the two groups' root patternsx:
+   *   - kFuseBreak: reject the fusion outright.
+   *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
+   *   - kFuseThrough: fuse.
+   * On success, CommitFuse(predecessor, sp) unions the groups along the walk, the
+   * predecessor is added to block, and expansion recurses into its predecessors.
+   *
+   * \param sp The seed node whose group is being extended.
+   * \param predecessor The backward neighbour considered for fusion.
+   * \param block The accumulating set of nodes fused into the seed's block.
+   */
   void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
                        std::unordered_set<IndexedForwardGraph::Node*>* block);
 };

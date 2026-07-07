@@ -54,6 +54,28 @@ enum OpPatternKind {
 };
 
 /*!
+ * \brief The DNNFusion (Niu et al., PLDI 2021, Table 2 / \S3.1) operator mapping type.
+ */
+enum MappingType {
+  // Each output element depends on exactly one input element at the same
+  // logical position (same-shape elementwise ops, activations, ...).
+  kOneToOne = 0,
+  // Each output element depends on one input element, but an input is
+  // broadcast to a larger output shape (e.g. an elementwise binop with a
+  // broadcasting operand).
+  kOneToMany = 1,
+  // Each output element depends on many input elements (conv, pool, GEMM,
+  // reduce, ...).
+  kManyToMany = 2,
+  // Output is an axis-preserving reindex of the input (reshape/flatten/squeeze).
+  kReorganize = 3,
+  // Output is an axis-permuting reindex of the input (transpose, depth<->space).
+  kShuffle = 4,
+  // Fallback for operators not covered by the lookup table.
+  kMappingOpaque = 8
+};
+
+/*!
  * \brief Infer output struct info given the call
  *
  * \param call The call expression to be derived.
