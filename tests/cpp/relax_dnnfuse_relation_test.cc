@@ -18,7 +18,8 @@
  */
 
 // Unit tests for relax::DNNFuseRelation::Classify, the producer/consumer
-// op-pattern classifier that drives the bidirectional RunDNNFuse merge.
+// mapping-type classifier (DNNFusion Table 3, \S3.2) that drives the
+// bidirectional RunDNNFuse merge.
 
 #include <gtest/gtest.h>
 #include <tvm/relax/op_attr_types.h>
@@ -32,7 +33,7 @@ namespace {
 
 // Assert that the relation classified from (src, sink) is exactly one kind,
 // checking the three mutually-exclusive predicates and the Name() string.
-void ExpectThrough(OpPatternKind src, OpPatternKind sink) {
+void ExpectThrough(MappingType src, MappingType sink) {
   auto rel = DNNFuseRelation::Classify(src, sink);
   EXPECT_TRUE(rel.IsThrough()) << "(" << src << ", " << sink << ") -> " << rel.Name();
   EXPECT_FALSE(rel.IsBreak());
@@ -40,7 +41,7 @@ void ExpectThrough(OpPatternKind src, OpPatternKind sink) {
   EXPECT_STREQ(rel.Name(), "fuse_through");
 }
 
-void ExpectBreak(OpPatternKind src, OpPatternKind sink) {
+void ExpectBreak(MappingType src, MappingType sink) {
   auto rel = DNNFuseRelation::Classify(src, sink);
   EXPECT_TRUE(rel.IsBreak()) << "(" << src << ", " << sink << ") -> " << rel.Name();
   EXPECT_FALSE(rel.IsThrough());
@@ -48,7 +49,7 @@ void ExpectBreak(OpPatternKind src, OpPatternKind sink) {
   EXPECT_STREQ(rel.Name(), "fuse_break");
 }
 
-void ExpectDepend(OpPatternKind src, OpPatternKind sink) {
+void ExpectDepend(MappingType src, MappingType sink) {
   auto rel = DNNFuseRelation::Classify(src, sink);
   EXPECT_TRUE(rel.IsDepend()) << "(" << src << ", " << sink << ") -> " << rel.Name();
   EXPECT_FALSE(rel.IsThrough());
@@ -56,88 +57,99 @@ void ExpectDepend(OpPatternKind src, OpPatternKind sink) {
   EXPECT_STREQ(rel.Name(), "fuse_depend");
 }
 
+// The five non-opaque DNNFusion Table 2 mapping types, used to sweep whole
+// rows/columns of Table 3 below.
+constexpr MappingType kAllMappingTypes[] = {kOneToOne, kOneToMany, kManyToMany, kReorganize,
+                                            kShuffle};
+
 }  // namespace
 
-// --- kFuseBreak: an opaque op on either side always breaks -----------------
+// --- kFuseBreak: kMappingOpaque on either side always breaks ---------------
+// (an op the Table 2 lookup couldn't classify; not part of Table 3 itself)
 
 TEST(DNNFuseRelation, OpaqueSourceAlwaysBreaks) {
-  // The opaque rule is checked first and overrides the through-rules below.
-  ExpectBreak(kOpaque, kElemWise);
-  ExpectBreak(kOpaque, kBroadcast);
-  ExpectBreak(kOpaque, kInjective);
-  ExpectBreak(kOpaque, kCommReduce);
-  ExpectBreak(kOpaque, kOutEWiseFusable);
-  ExpectBreak(kOpaque, kTuple);
-  ExpectBreak(kOpaque, kOpaque);
+  for (MappingType sink : kAllMappingTypes) ExpectBreak(kMappingOpaque, sink);
+  ExpectBreak(kMappingOpaque, kMappingOpaque);
 }
 
 TEST(DNNFuseRelation, OpaqueSinkAlwaysBreaks) {
-  ExpectBreak(kElemWise, kOpaque);
-  ExpectBreak(kBroadcast, kOpaque);
-  ExpectBreak(kInjective, kOpaque);
-  ExpectBreak(kCommReduce, kOpaque);
-  ExpectBreak(kOutEWiseFusable, kOpaque);
-  ExpectBreak(kTuple, kOpaque);
+  for (MappingType src : kAllMappingTypes) ExpectBreak(src, kMappingOpaque);
 }
 
-// --- kFuseThrough: an elementwise op on either side ------------------------
+// --- kFuseThrough: One-to-One fuses with anything, in either order ---------
+//
+// "When a One-to-One operator (with the input I and the output O) is fused
+// with an operator of any type (Op2) ... this fusion [is] correct and
+// profitable." Table 3's One-to-One row and column are both all-green.
 
-TEST(DNNFuseRelation, ElemWiseSourceFusesThroughAnyNonOpaqueSink) {
-  ExpectThrough(kElemWise, kElemWise);
-  ExpectThrough(kElemWise, kBroadcast);
-  ExpectThrough(kElemWise, kInjective);
-  ExpectThrough(kElemWise, kCommReduce);
-  ExpectThrough(kElemWise, kOutEWiseFusable);
+TEST(DNNFuseRelation, OneToOneSourceFusesThroughAnySink) {
+  for (MappingType sink : kAllMappingTypes) ExpectThrough(kOneToOne, sink);
 }
 
-TEST(DNNFuseRelation, ElemWiseSinkFusesThroughAnyNonOpaqueSource) {
-  // The elementwise rule fires on either operand, including the heavier
-  // patterns that would otherwise hit the structural kFuseBreak rule.
-  ExpectThrough(kBroadcast, kElemWise);
-  ExpectThrough(kInjective, kElemWise);
-  ExpectThrough(kCommReduce, kElemWise);
-  ExpectThrough(kOutEWiseFusable, kElemWise);
+TEST(DNNFuseRelation, OneToOneSinkFusesThroughAnySource) {
+  for (MappingType src : kAllMappingTypes) ExpectThrough(src, kOneToOne);
 }
 
-TEST(DNNFuseRelation, InjectiveIntoInjectiveFusesThrough) {
-  ExpectThrough(kInjective, kInjective);
+// --- kFuseThrough: Reorganize/Shuffle are variants of One-to-One and fuse --
+//     directly with each other -----------------------------------------------
+//
+// "Both types are variants of One-to-One with a special mapping function
+// between the input and the output. Above reasons for the correctness
+// analysis are also applied here."
+
+TEST(DNNFuseRelation, ReorganizeAndShuffleFuseThroughEachOther) {
+  ExpectThrough(kReorganize, kReorganize);
+  ExpectThrough(kReorganize, kShuffle);
+  ExpectThrough(kShuffle, kReorganize);
+  ExpectThrough(kShuffle, kShuffle);
 }
 
-// --- kFuseBreak: broadcast/reduce-or-heavier producer into reduce-or-heavier
-//     consumer ------------------------------------------------------------
+// --- kFuseBreak: the two explicitly unprofitable (Table 3 "x") cells -------
 
-TEST(DNNFuseRelation, BroadcastIntoReduceOrHeavierBreaks) {
-  ExpectBreak(kBroadcast, kCommReduce);
-  ExpectBreak(kBroadcast, kOutEWiseFusable);
-  ExpectBreak(kBroadcast, kTuple);
+TEST(DNNFuseRelation, OneToManyIntoManyToManyBreaks) {
+  // "Take the case that Expand followed by Conv ... we consider this fusion
+  // unprofitable."
+  ExpectBreak(kOneToMany, kManyToMany);
 }
 
-TEST(DNNFuseRelation, ReduceOrHeavierIntoReduceOrHeavierBreaks) {
-  ExpectBreak(kCommReduce, kCommReduce);
-  ExpectBreak(kOutEWiseFusable, kCommReduce);
-  ExpectBreak(kOutEWiseFusable, kTuple);
-  ExpectBreak(kTuple, kTuple);
+TEST(DNNFuseRelation, ManyToManyIntoManyToManyBreaks) {
+  // "When a Many-to-One mapping operator is followed by another Conv,
+  // attempting a combined execution will be too complicated ... we consider
+  // them unprofitable."
+  ExpectBreak(kManyToMany, kManyToMany);
 }
 
-// --- kFuseDepend: everything else (no decision on its own) -----------------
+// --- kFuseDepend: legal, but needs profiling --------------------------------
 
-TEST(DNNFuseRelation, BroadcastIntoLightConsumerDepends) {
-  // Producer qualifies for break, but the sink is lighter than kCommReduce.
-  ExpectDepend(kBroadcast, kBroadcast);
-  ExpectDepend(kBroadcast, kInjective);
+TEST(DNNFuseRelation, ManyToManyIntoOneToManyDepends) {
+  // "When a Many-to-One mapping operator is followed by a One-to-Many
+  // operator, e.g. Conv followed by Expand or Resize, a combined execution
+  // may or may not have a desirable data access pattern ... requiring
+  // further profiling."
+  ExpectDepend(kManyToMany, kOneToMany);
 }
 
-TEST(DNNFuseRelation, InjectiveIntoNonInjectiveDepends) {
-  // Not injective-into-injective, and src is too light to break.
-  ExpectDepend(kInjective, kBroadcast);
-  ExpectDepend(kInjective, kCommReduce);
-  ExpectDepend(kInjective, kOutEWiseFusable);
+TEST(DNNFuseRelation, OneToManyIntoOneToManyDepends) {
+  // Table 3 does not mark (One-to-Many, One-to-Many) with an "x" (unlike the
+  // two Many-to-Many-involving cells above), so it is not illegal; it also
+  // isn't one of the explicitly green One-to-One/Reorganize/Shuffle cells.
+  // Treated as needing profiling.
+  ExpectDepend(kOneToMany, kOneToMany);
 }
 
-TEST(DNNFuseRelation, ReduceOrHeavierIntoLightConsumerDepends) {
-  // Producer qualifies for break, but the sink is lighter than kCommReduce.
-  ExpectDepend(kCommReduce, kBroadcast);
-  ExpectDepend(kCommReduce, kInjective);
-  ExpectDepend(kOutEWiseFusable, kBroadcast);
-  ExpectDepend(kOutEWiseFusable, kInjective);
+TEST(DNNFuseRelation, ReorganizeOrShuffleProducerIntoOneToManyOrManyToManyDepends) {
+  // "... however, when fusing with One-to-Many or Many-to-Many types
+  // operators, profitability needs to be validated with further profiling."
+  ExpectDepend(kReorganize, kOneToMany);
+  ExpectDepend(kReorganize, kManyToMany);
+  ExpectDepend(kShuffle, kOneToMany);
+  ExpectDepend(kShuffle, kManyToMany);
+}
+
+TEST(DNNFuseRelation, OneToManyOrManyToManyProducerIntoReorganizeOrShuffleDepends) {
+  // Same Reorder-or-Shuffle exception, other direction.
+  ExpectDepend(kOneToMany, kReorganize);
+  ExpectDepend(kOneToMany, kShuffle);
+  ExpectDepend(kManyToMany, kReorganize);
+  ExpectDepend(kManyToMany, kShuffle);
 }
