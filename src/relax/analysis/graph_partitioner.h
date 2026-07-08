@@ -58,6 +58,23 @@ using support::LinkNode;
 int64_t StructInfoBytes(const StructInfo& sinfo);
 
 /*!
+ * \brief Human-readable name of a DNNFusion Table 2 MappingType, for debug logs.
+ * \param m The mapping type.
+ * \return The enumerator name, or "kUnknown" for out-of-range values.
+ */
+inline const char* MappingTypeName(MappingType m) {
+  switch (m) {
+    case kOneToOne: return "kOneToOne";
+    case kOneToMany: return "kOneToMany";
+    case kManyToMany: return "kManyToMany";
+    case kReorganize: return "kReorganize";
+    case kShuffle: return "kShuffle";
+    case kMappingOpaque: return "kMappingOpaque";
+    default: return "kUnknown";
+  }
+}
+
+/*!
  * \brief The DNNFusion-style fusion relation between a producer/consumer op pair.
  *
  * Classifies an ordered (src -> sink) MappingType pair -- DNNFusion (Niu et al.,
@@ -164,25 +181,13 @@ class IndexedForwardGraph {
 
   /*! \brief Dump the graph into string. */
   void DebugDump() const {
-    auto pattern_name = [](OpPatternKind p) -> const char* {
-      switch (p) {
-        case kElemWise: return "kElemWise";
-        case kBroadcast: return "kBroadcast";
-        case kInjective: return "kInjective";
-        case kCommReduce: return "kCommReduce";
-        case kOutEWiseFusable: return "kOutEWiseFusable";
-        case kTuple: return "kTuple";
-        case kOpaque: return "kOpaque";
-        default: return "kUnknown";
-      }
-    };
     std::ostringstream os;
     for (size_t i = 0; i < post_dfs_order.size(); ++i) {
       Node* node = post_dfs_order[i];
       std::string bytes_str =
           node->output_size < 0 ? "?" : std::to_string(node->output_size);
       os << "node[" << i << "], " << ffi::GetRef<ObjectRef>(node->ref)
-         << " pattern=" << pattern_name(node->pattern)
+         << " mapping=" << MappingTypeName(node->mapping_type)
          << " bytes=" << bytes_str << " outputs=[";
       for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
         os << link->value.node->index << ", ";
@@ -193,6 +198,24 @@ class IndexedForwardGraph {
               << os.str();
   }
 };
+
+/*!
+ * \brief Find the One-to-One node with the smallest output among unfused ops.
+ *
+ * The RunDNNFuse seed selector (DNNFusion Listing 1 Step 1): considers only
+ * nodes whose mapping_type is kOneToOne and whose output_size is known
+ * (non-negative), and returns the one with the smallest output_size. Ties are
+ * broken by the smaller node index to keep the selection deterministic.
+ *
+ * Defined in src/relax/analysis/graph_partitioner.cc; declared here so it is
+ * reachable from unit tests.
+ *
+ * \param unfused_ops The set of candidate nodes that have not been fused yet.
+ * \return The matching node with the minimum output size, or nullptr if no
+ *         eligible One-to-One node exists.
+ */
+IndexedForwardGraph::Node* FindMinOtO(
+    const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops);
 
 /*!
  * \brief Dominator tree that represent domination or
@@ -409,8 +432,9 @@ class GraphPartitioner {
    * via relax.transform.FuseOps(fuse_opt_level=6)), replacing the default
    * 3-phase RunFuse pipeline. Instead of the dominator-tree-based grouping, it
    * works directly off the cached pattern / mapping_type / output_size on each
-   * IndexedForwardGraph::Node, seeding from element-wise ops and expanding into
-   * successors / predecessors (via DNNFuseRelation::Classify on mapping_type).
+   * IndexedForwardGraph::Node, seeding from the smallest One-to-One operator
+   * and expanding into successors / predecessors (via DNNFuseRelation::Classify
+   * on mapping_type).
    *
    * \param graph The indexed forward graph to fuse over.
    */

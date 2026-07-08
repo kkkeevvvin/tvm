@@ -26,23 +26,11 @@
 namespace tvm {
 namespace relax {
 
-namespace {
-/*!
- * \brief Find the element-wise node with the smallest output among unfused ops.
- *
- * Considers only nodes whose pattern is kElemWise and whose output_size is
- * known (non-negative), and returns the one with the smallest output_size.
- * Ties are broken by the smaller node index to keep the selection deterministic.
- *
- * \param unfused_ops The set of candidate nodes that have not been fused yet.
- * \return The matching node with the minimum output size, or nullptr if no
- *         eligible element-wise node exists.
- */
-IndexedForwardGraph::Node* FindMinElemWise(
+IndexedForwardGraph::Node* FindMinOtO(
     const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
   IndexedForwardGraph::Node* min_node = nullptr;
   for (IndexedForwardGraph::Node* node : unfused_ops) {
-    if (node->pattern != kElemWise) continue;
+    if (node->mapping_type != kOneToOne) continue;
     if (node->output_size < 0) continue;
     if (min_node == nullptr || node->output_size < min_node->output_size ||
         (node->output_size == min_node->output_size && node->index < min_node->index)) {
@@ -51,7 +39,6 @@ IndexedForwardGraph::Node* FindMinElemWise(
   }
   return min_node;
 }
-}  // namespace
 
 DominatorTree DominatorTree::PostDom(support::Arena* arena, const IndexedForwardGraph& graph) {
   DominatorTree tree;
@@ -479,7 +466,8 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
                                      std::unordered_set<IndexedForwardGraph::Node*>* block) {
   LOG(INFO) << "  successor of node[" << sp->index << "]:"
             << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
-            << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
+            << " (mapping=" << MappingTypeName(successor->mapping_type)
+            << ", bytes=" << successor->output_size << ")";
   // check the mapping relationship
   MappingType sp_map = groups_[sp->index]->FindRoot()->mapping_type;
   MappingType succ_map = groups_[successor->index]->FindRoot()->mapping_type;
@@ -508,7 +496,8 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
                                        std::unordered_set<IndexedForwardGraph::Node*>* block) {
   LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
             << " node[" << predecessor->index << "] " << ffi::GetRef<ObjectRef>(predecessor->ref)
-            << " (pattern=" << predecessor->pattern << ", bytes=" << predecessor->output_size << ")";
+            << " (mapping=" << MappingTypeName(predecessor->mapping_type)
+            << ", bytes=" << predecessor->output_size << ")";
   // check the mapping relationship
   MappingType sp_map = groups_[sp->index]->FindRoot()->mapping_type;
   MappingType pred_map = groups_[predecessor->index]->FindRoot()->mapping_type;
@@ -540,10 +529,10 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
   IndexedForwardGraph::Node* seed = nullptr;
   // generate seed
-  while ((seed = FindMinElemWise(unfused_ops)) != nullptr) {
+  while ((seed = FindMinOtO(unfused_ops)) != nullptr) {
     // block = [ seed ]
     std::unordered_set<IndexedForwardGraph::Node*> block{seed};
-    LOG(INFO) << "\nkElemWise op with min output_size:"
+    LOG(INFO) << "\nkOneToOne op with min output_size:"
               << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
               << " bytes=" << seed->output_size;
     // head to successor
