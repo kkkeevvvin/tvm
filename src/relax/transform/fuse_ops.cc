@@ -255,6 +255,15 @@ class GraphCreator : public ExprVisitor {
       } else {
         pattern = OpPatternKind::kOpaque;
       }
+
+      // The DNNFusion Table 2 mapping type, annotated by AnnotateTIROpMappingType; used
+      // only by RunDNNFuse (opt_level 6). Absent (e.g. AnnotateTIROpMappingType did not
+      // run) means kMappingOpaque, the node's default.
+      ffi::Optional<Integer> opt_mapping_type = func->GetAttr<Integer>("mapping_type");
+      if (opt_mapping_type.defined()) {
+        SetNodeMappingType(binding_var_node,
+                           static_cast<MappingType>(Downcast<IntImm>(opt_mapping_type)->value));
+      }
     }
     // The pattern of the current binding variable node is set to the pattern of this operator.
     SetNodePattern(binding_var_node, pattern);
@@ -404,6 +413,18 @@ class GraphCreator : public ExprVisitor {
         << " cannot have have its OpPatternKind set more than once.";
     initialized_nodes_.insert(node);
     node->pattern = pattern;
+  }
+
+  /*!
+   * \brief Set the DNNFusion Table 2 mapping type of the input node, used only by
+   * RunDNNFuse (opt_level 6). Unlike SetNodePattern, this is not required to be called
+   * for every node -- nodes that are not call_tir to an AnnotateTIROpMappingType-annotated
+   * PrimFunc keep the node's default of kMappingOpaque.
+   * \param node The graph node to be set
+   * \param mapping_type The mapping type of the node
+   */
+  void SetNodeMappingType(IndexedForwardGraph::Node* node, MappingType mapping_type) {
+    node->mapping_type = mapping_type;
   }
 
  private:

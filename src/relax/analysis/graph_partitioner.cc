@@ -344,6 +344,7 @@ void GraphPartitioner::InitGroups(const IndexedForwardGraph& graph) {
     const auto* graph_node = graph.post_dfs_order[nid];
     auto* group_node = arena_->make<Group>();
     group_node->pattern = graph_node->pattern;
+    group_node->mapping_type = graph_node->mapping_type;
     group_node->root_ref = graph_node->ref;
     // set anchor ref if necessary.
     if (group_node->pattern == kOutEWiseFusable) {
@@ -480,9 +481,9 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
             << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
             << " (pattern=" << successor->pattern << ", bytes=" << successor->output_size << ")";
   // check the mapping relationship
-  OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
-  OpPatternKind succ_pat = groups_[successor->index]->FindRoot()->pattern;
-  DNNFuseRelation relation = DNNFuseRelation::Classify(sp_pat, succ_pat);
+  MappingType sp_map = groups_[sp->index]->FindRoot()->mapping_type;
+  MappingType succ_map = groups_[successor->index]->FindRoot()->mapping_type;
+  DNNFuseRelation relation = DNNFuseRelation::Classify(sp_map, succ_map);
   LOG(INFO) << "    relation = " << relation.Name();
   // return if successor can not be fused
   if (relation.IsBreak()) return;
@@ -509,9 +510,9 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
             << " node[" << predecessor->index << "] " << ffi::GetRef<ObjectRef>(predecessor->ref)
             << " (pattern=" << predecessor->pattern << ", bytes=" << predecessor->output_size << ")";
   // check the mapping relationship
-  OpPatternKind sp_pat = groups_[sp->index]->FindRoot()->pattern;
-  OpPatternKind pred_pat = groups_[predecessor->index]->FindRoot()->pattern;
-  DNNFuseRelation relation = DNNFuseRelation::Classify(pred_pat, sp_pat);
+  MappingType sp_map = groups_[sp->index]->FindRoot()->mapping_type;
+  MappingType pred_map = groups_[predecessor->index]->FindRoot()->mapping_type;
+  DNNFuseRelation relation = DNNFuseRelation::Classify(pred_map, sp_map);
   LOG(INFO) << "    relation = " << relation.Name();
   // return if predecessor can not be fused
   if (relation.IsBreak()) return;

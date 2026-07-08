@@ -60,14 +60,16 @@ int64_t StructInfoBytes(const StructInfo& sinfo);
 /*!
  * \brief The DNNFusion-style fusion relation between a producer/consumer op pair.
  *
- * Classifies an ordered (src -> sink) op-pattern pair into one of three kinds
- * that drive the bidirectional RunDNNFuse merge:
- *  - kFuseBreak: the pair must not be fused. An opaque op on either side always
- *    breaks; so does a broadcast/reduce/heavier producer feeding a
- *    reduce-or-heavier consumer.
- *  - kFuseThrough: the pair should be fused (an elementwise op on either side,
- *    or injective-into-injective) -- unless an opaque op already forced a break.
- *  - kFuseDepend: no decision on its own; defer to the surrounding planner.
+ * Classifies an ordered (src -> sink) MappingType pair -- DNNFusion (Niu et al.,
+ * PLDI'21) Table 3, \S3.2 -- into one of three kinds that drive the bidirectional
+ * RunDNNFuse merge:
+ *  - kFuseBreak: the pair is illegal or known-unprofitable (Table 3's red cells).
+ *    kMappingOpaque on either side always breaks, since it means the op fell
+ *    outside DNNFusion's Table 2 classification.
+ *  - kFuseThrough: the pair is legal and profitable with no further analysis
+ *    needed (Table 3's green cells).
+ *  - kFuseDepend: legal, but profitability requires profiling (Table 3's yellow
+ *    cells); no decision on its own, defer to the surrounding planner.
  *
  * Defined inline here so the classifier is reachable from unit tests and the
  * graph_partitioner translation unit alike.
@@ -76,18 +78,26 @@ class DNNFuseRelation {
  public:
   enum Kind { kFuseThrough, kFuseBreak, kFuseDepend };
   /*!
-   * \brief Classify the fusion relation between a source and a sink op pattern.
-   * \param src The pattern of the source (producer) op.
-   * \param sink The pattern of the sink (consumer) op.
+   * \brief Classify the fusion relation between a source and a sink mapping type.
+   * \param src The MappingType of the source (producer) op.
+   * \param sink The MappingType of the sink (consumer) op.
    * \return The classified relation.
    */
-  static DNNFuseRelation Classify(OpPatternKind src, OpPatternKind sink) {
-    if (src == kOpaque || sink == kOpaque) return DNNFuseRelation(kFuseBreak);
-    if (src == kElemWise || sink == kElemWise) return DNNFuseRelation(kFuseThrough);
-    if (src == kInjective && sink == kInjective) return DNNFuseRelation(kFuseThrough);
-    if ((src == kBroadcast || src >= kCommReduce) && (sink >= kCommReduce))
-      return DNNFuseRelation(kFuseBreak);
-    return DNNFuseRelation(kFuseDepend);
+  static DNNFuseRelation Classify(MappingType src, MappingType sink) {
+    if (src == kMappingOpaque || sink == kMappingOpaque) return DNNFuseRelation(kFuseBreak);
+    // DNNFusion Table 3: rows are the producer (first op), columns are the
+    // consumer (second op), matching this function's (src, sink) order.
+    // Indexed directly by MappingType's enum value (0..4); kMappingOpaque is
+    // handled above and never reaches this table.
+    static constexpr Kind kTable[5][5] = {
+        //                sink=O2O      sink=O2M      sink=M2M      sink=Reorg    sink=Shuffle
+        /* src=O2O    */ {kFuseThrough, kFuseThrough, kFuseThrough, kFuseThrough, kFuseThrough},
+        /* src=O2M    */ {kFuseThrough, kFuseDepend, kFuseBreak, kFuseDepend, kFuseDepend},
+        /* src=M2M    */ {kFuseThrough, kFuseDepend, kFuseBreak, kFuseDepend, kFuseDepend},
+        /* src=Reorg  */ {kFuseThrough, kFuseDepend, kFuseDepend, kFuseThrough, kFuseThrough},
+        /* src=Shuffle*/ {kFuseThrough, kFuseDepend, kFuseDepend, kFuseThrough, kFuseThrough},
+    };
+    return DNNFuseRelation(kTable[static_cast<int>(src)][static_cast<int>(sink)]);
   }
 
   bool IsThrough() const { return kind_ == kFuseThrough; }
@@ -138,6 +148,8 @@ class IndexedForwardGraph {
     bool extern_ref{false};
     /*! \brief The general pattern in the node */
     OpPatternKind pattern{kOpaque};
+    /*! \brief The DNNFusion Table 2 mapping type of the node, used by RunDNNFuse. */
+    MappingType mapping_type{kMappingOpaque};
     /*! \brief Output size in bytes; -1 if unknown / dynamic / opaque sinfo. */
     int64_t output_size{-1};
     /*! \brief The outputs of the node. */
@@ -266,6 +278,8 @@ class GraphPartitioner {
     Group* parent{nullptr};
     /*! \brief The pattern of the group */
     OpPatternKind pattern;
+    /*! \brief The DNNFusion Table 2 mapping type of the group, used by RunDNNFuse. */
+    MappingType mapping_type;
     /*! \brief reference to the root node. */
     const tvm::Object* root_ref{nullptr};
     /*!
@@ -394,9 +408,9 @@ class GraphPartitioner {
    * Alternative fusion path selected when opt_level_ == 6 (driven from Python
    * via relax.transform.FuseOps(fuse_opt_level=6)), replacing the default
    * 3-phase RunFuse pipeline. Instead of the dominator-tree-based grouping, it
-   * works directly off the cached pattern / output_size on each
+   * works directly off the cached pattern / mapping_type / output_size on each
    * IndexedForwardGraph::Node, seeding from element-wise ops and expanding into
-   * successors / predecessors.
+   * successors / predecessors (via DNNFuseRelation::Classify on mapping_type).
    *
    * \param graph The indexed forward graph to fuse over.
    */
@@ -407,7 +421,7 @@ class GraphPartitioner {
    * Implements RunDNNFuse's forward expansion (DNNFusion Listing 1
    * Step 2.1-2.3), walking Node::outputs along the data path sp -> successor.
    * The successor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root patterns:
+   * the two groups' root mapping types:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
@@ -429,7 +443,7 @@ class GraphPartitioner {
    * walking Node::inputs instead of Node::outputs, along the data path 
    * predecessor -> sp.
    * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root patternsx:
+   * the two groups' root mapping types:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
