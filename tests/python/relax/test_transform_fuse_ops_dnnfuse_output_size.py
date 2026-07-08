@@ -21,8 +21,9 @@ The cached ``output_size`` (commit 916151140) is internal C++ state with no
 Python accessor. It is populated by ``GraphCreator::Create`` -- which runs
 *unconditionally* at the start of ``relax::FuseOps`` for every graph node,
 before any partitioning -- and read by the DNNFuse seed selector
-``FindMinElemWise`` (``FuseOps(fuse_opt_level=6)``), which skips nodes whose
-``output_size`` is the ``-1`` "unknown / dynamic / opaque" sentinel.
+``FindMinOtO`` (``FuseOps(fuse_opt_level=6)``), which considers only nodes
+whose ``mapping_type`` is ``kOneToOne`` and skips nodes whose ``output_size``
+is the ``-1`` "unknown / dynamic / opaque" sentinel.
 
 Exact byte values are pinned in the C++ unit test
 ``tests/cpp/relax_struct_info_bytes_test.cc``. These Python tests drive the
@@ -32,9 +33,11 @@ field is exercised on real Relax modules and regression-guarded:
 * ``fuse_opt_level=0`` builds the indexed-forward graph (computing
   ``output_size`` for every tensor / tuple node) and then returns before
   fusing -- a stable way to run the population path through the public API.
-* ``fuse_opt_level=6`` on an all-dynamic graph runs ``RunDNNFuse``; every node
-  carries the ``-1`` sentinel, so ``FindMinElemWise`` finds no seed and the
-  pass completes -- exercising the sentinel-skip branch of the consumer.
+* ``fuse_opt_level=6`` on an all-dynamic graph runs ``RunDNNFuse``; the relu
+  node classifies ``kOneToOne`` (Table 2 is keyed on the op name, so dynamic
+  shapes do not opaque it) yet carries the ``-1`` sentinel, so ``FindMinOtO``
+  finds no seed and the pass completes -- exercising the sentinel-skip branch
+  of the consumer.
 """
 
 import tvm
@@ -49,7 +52,7 @@ DNNFUSE = 6
 
 
 def _annotate(mod):
-    return relax.transform.AnnotateTIROpPattern()(mod)
+    return relax.transform.AnnotateTIROpMappingType()(mod)
 
 
 def test_output_size_population_static_tensors():
@@ -98,7 +101,7 @@ def test_output_size_population_tuple():
 
 
 def test_dnnfuse_consumer_skips_dynamic_sentinel():
-    """Dynamic dims yield output_size == -1; FindMinElemWise finds no seed."""
+    """Dynamic dims yield output_size == -1; FindMinOtO finds no seed."""
 
     def before():
         bb = relax.BlockBuilder()
@@ -106,14 +109,14 @@ def test_dnnfuse_consumer_skips_dynamic_sentinel():
         x = relax.Var("x", relax.TensorStructInfo([n, 20], "float32"))
         with bb.function("main", [x], {"relax.force_pure": True}):
             with bb.dataflow():
-                lv0 = bb.emit_te(topi.add, x, relax.const(1, "float32"))
+                lv0 = bb.emit_te(topi.nn.relu, x)
                 gv = bb.emit_output(bb.emit_te(topi.exp, lv0))
             bb.emit_func_output(gv)
         return bb.get()
 
     mod = _annotate(before())
-    # All nodes carry the -1 sentinel, so RunDNNFuse seeds nothing and the
-    # DNNFuse path completes without fusing.
+    # The relu node is kOneToOne but carries the -1 sentinel, so RunDNNFuse
+    # seeds nothing and the DNNFuse path completes without fusing.
     out = relax.transform.FuseOps(fuse_opt_level=DNNFUSE)(mod)
 
     assert well_formed(out)
