@@ -142,16 +142,15 @@ TEST(RunDNNFusePredecessor, StopsAtOpaqueMappingTypeSource) {
 
 // --- Diamond / multi-output topologies ------------------------------------
 //
-// The chain tests above keep every node single-input/single-output, so
-// CheckPath_ / CommitFuse_ never recurse over branches. These exercise the
-// forward (and backward) cone walk where a node fans out to -- or joins from --
-// more than one neighbour.
+// The chain tests above keep every node single-input/single-output. These
+// exercise fan-out, where CommitFuseEdge's edge-locality matters: each merge
+// touches exactly the two groups joined by the edge under consideration, so
+// sibling branches neither veto nor get dragged into an unrelated fusion.
 //
 // An all-One-to-One diamond fuses into a single group. The seed has two
-// outgoing edges: CommitFuse(seed, branch) merges the path to that branch, then
-// FuseSuccessor recurses into the branch's outputs, so the join is reached and
-// fused through both branches. The multi-output cone walk in CheckPath_ /
-// CommitFuse_ (now restricted to the path to each sink) is what is under test.
+// outgoing edges: each fuses edge-locally, then FuseSuccessor recurses into
+// the branch's outputs, so the join is reached and fused through both
+// branches (the second arrival is a same-root no-op).
 /*
         n0 (seed)
         /      \
@@ -177,15 +176,14 @@ TEST(RunDNNFuseSuccessor, DiamondAllOneToOneFusesEntirely) {
   EXPECT_TRUE(SameGroup(groups, n0, n3));
 }
 
-// Same diamond, but the join is kMappingOpaque. CheckPath / CommitFuse restrict
-// the cone walk to the path that actually terminates at the sink, so fusing
-// seed->branch no longer inspects (or pulls in) the opaque join reachable
-// through the *sibling* branch: seed->n1 only sees n1, seed->n2 only sees n2.
-// Both branches classify as through and fuse, so the One-to-One body
-// {n0,n1,n2} collapses into one group while the opaque join n3 -- left out as
-// a downstream consumer -- stays separate. The resulting partition is still
-// convex (n3 only consumes from the group, never feeds back), which is why
-// excluding it is legal.
+// Same diamond, but the join is kMappingOpaque. CommitFuseEdge is edge-local,
+// so fusing seed->branch never inspects (or pulls in) the opaque join
+// reachable through the *sibling* branch: seed->n1 merges only n0 and n1's
+// groups, seed->n2 only n0's and n2's. Both branches classify as through and
+// fuse, so the One-to-One body {n0,n1,n2} collapses into one group while the
+// opaque join n3 -- rejected on its own edges by the relation break -- stays
+// separate. The resulting partition is still convex (n3 only consumes from
+// the group, never feeds back), which is why excluding it is legal.
 /*
         n0 (seed)
         /      \
@@ -238,4 +236,50 @@ TEST(RunDNNFusePredecessor, DiamondSeedAtJoinFusesEntirely) {
   EXPECT_TRUE(SameGroup(groups, n3, n1));
   EXPECT_TRUE(SameGroup(groups, n3, n2));
   EXPECT_TRUE(SameGroup(groups, n3, n0));
+}
+
+// --- Derived group MappingType drives the next hop --------------------------
+//
+// CommitFuseEdge stamps the surviving root with Table 3's fused type
+// (relation.FusedType()), so later edges classify against the group's evolved
+// type rather than the stale InitGroups value of whichever node happens to be
+// the union-find root.
+
+// Forward: O2O -> M2M -> O2O -> M2M. The second hop merges into n2's group
+// (initialized One-to-One) but derives Many-to-Many, so the third edge
+// classifies as (M2M, M2M) = break and n3 stays out. Against the stale root
+// type the edge would classify (O2O, M2M) = through and over-fuse.
+TEST(RunDNNFuseSuccessor, DerivedGroupTypeStopsChainForward) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kOneToOne, 10);  // smallest output -> seed
+  auto* n1 = b.AddNode(kManyToMany, 20);
+  auto* n2 = b.AddNode(kOneToOne, 30);
+  auto* n3 = b.AddNode(kManyToMany, 40);
+  b.AddEdge(n0, n1);
+  b.AddEdge(n1, n2);
+  b.AddEdge(n2, n3);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_TRUE(SameGroup(groups, n0, n1));
+  EXPECT_TRUE(SameGroup(groups, n0, n2));
+  EXPECT_FALSE(SameGroup(groups, n0, n3));
+  EXPECT_EQ(groups[n0->index]->FindRoot()->mapping_type, kManyToMany);
+}
+
+// The backward mirror: M2M -> M2M -> O2O(seed). The first backward hop merges
+// n1 into the seed's group (initialized One-to-One) and derives Many-to-Many,
+// so the next edge classifies as (M2M, M2M) = break and n0 stays out. Against
+// the stale root type it would classify (M2M, O2O) = through and over-fuse.
+TEST(RunDNNFusePredecessor, DerivedGroupTypeStopsChainBackward) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kManyToMany, 30);
+  auto* n1 = b.AddNode(kManyToMany, 20);
+  auto* n2 = b.AddNode(kOneToOne, 5);  // the only One-to-One -> seed
+  b.AddEdge(n0, n1);
+  b.AddEdge(n1, n2);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_TRUE(SameGroup(groups, n2, n1));
+  EXPECT_FALSE(SameGroup(groups, n2, n0));
+  EXPECT_EQ(groups[n2->index]->FindRoot()->mapping_type, kManyToMany);
 }

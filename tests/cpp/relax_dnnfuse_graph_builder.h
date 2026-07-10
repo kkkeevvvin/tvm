@@ -51,10 +51,10 @@ class GraphBuilder {
   // Add a node with the given mapping_type/output size; its index is its
   // position in post_dfs_order, matching the indexing
   // GraphPartitioner::groups_ relies on. Every node gets OpPatternKind
-  // kElemWise so the structural CheckPath fcond in FuseSuccessor /
-  // FusePredecessor never itself blocks a fusion; only `mapping_type` -- which
-  // drives both seed selection (FindMinOtO looks for kOneToOne) and
-  // DNNFuseRelation::Classify (DNNFusion Table 3) -- is under test.
+  // kElemWise, but the DNNFuse path never consults the pattern: only
+  // `mapping_type` -- which drives both seed selection (FindMinOtO looks for
+  // kOneToOne) and DNNFuseRelation::Classify (DNNFusion Table 3) -- is under
+  // test.
   IndexedForwardGraph::Node* AddNode(MappingType mapping_type, int64_t output_size) {
     auto* node = arena_.make<IndexedForwardGraph::Node>();
     node->index = graph_.post_dfs_order.size();
