@@ -461,6 +461,50 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
   }
 }
 
+bool GraphPartitioner::CheckEdgeConvexity(const IndexedForwardGraph& graph,
+                                          IndexedForwardGraph::Node* src,
+                                          IndexedForwardGraph::Node* sink) {
+  Group* src_root = groups_[src->index]->FindRoot();
+  Group* sink_root = groups_[sink->index]->FindRoot();
+  if (src_root == sink_root) return true;
+  const size_t num_nodes = graph.post_dfs_order.size();
+  // Membership masks of the two groups about to merge.
+  std::vector<bool> in_src(num_nodes, false);
+  std::vector<bool> in_sink(num_nodes, false);
+  for (size_t i = 0; i < num_nodes; ++i) {
+    Group* root = groups_[i]->FindRoot();
+    if (root == src_root) in_src[i] = true;
+    if (root == sink_root) in_sink[i] = true;
+  }
+  // DFS forward from every edge that leaves src's group into an outside node.
+  // Reaching sink's group means some src->sink path runs through nodes the
+  // merged group would exclude, i.e. the merge would make the partition
+  // quotient cyclic. (The reverse direction needs no check: the partition is
+  // acyclic so far and the direct edge src->sink already exists, so a
+  // sink->src path cannot.)
+  std::vector<bool> visited(num_nodes, false);
+  std::vector<IndexedForwardGraph::Node*> stack;
+  for (size_t i = 0; i < num_nodes; ++i) {
+    if (!in_src[i]) continue;
+    for (auto* link = graph.post_dfs_order[i]->outputs.head; link != nullptr; link = link->next) {
+      IndexedForwardGraph::Node* out = link->value.node;
+      if (!in_src[out->index] && !in_sink[out->index]) stack.push_back(out);
+    }
+  }
+  while (!stack.empty()) {
+    IndexedForwardGraph::Node* node = stack.back();
+    stack.pop_back();
+    if (visited[node->index]) continue;
+    visited[node->index] = true;
+    for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
+      IndexedForwardGraph::Node* out = link->value.node;
+      if (in_sink[out->index]) return false;
+      if (!in_src[out->index] && !visited[out->index]) stack.push_back(out);
+    }
+  }
+  return true;
+}
+
 void GraphPartitioner::CommitFuseEdge(IndexedForwardGraph::Node* src,
                                       IndexedForwardGraph::Node* sink,
                                       const DNNFuseRelation& relation) {
@@ -484,7 +528,8 @@ void GraphPartitioner::CommitFuseEdge(IndexedForwardGraph::Node* src,
   sink_root->mapping_type = relation.FusedType();
 }
 
-void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
+void GraphPartitioner::FuseSuccessor(const IndexedForwardGraph& graph,
+                                     IndexedForwardGraph::Node* sp,
                                      IndexedForwardGraph::Node* successor,
                                      std::unordered_set<IndexedForwardGraph::Node*>* block) {
   LOG(INFO) << "  successor of node[" << sp->index << "]:"
@@ -500,15 +545,23 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
+  // Structural gate: skip merges that would leave a src->sink path outside the
+  // group (e.g. a residual skip edge fused around its own branch). The edge may
+  // become fusable later, once the branch nodes have joined either group.
+  if (!CheckEdgeConvexity(graph, sp, successor)) {
+    LOG(INFO) << "    skipped: merge would break group convexity";
+    return;
+  }
   CommitFuseEdge(sp, successor, relation);
   block->insert(successor);
   // Recurse into the fused successor to extend the chain past one hop.
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
-    FuseSuccessor(successor, link->value.node, block);
+    FuseSuccessor(graph, successor, link->value.node, block);
   }
 }
 
-void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
+void GraphPartitioner::FusePredecessor(const IndexedForwardGraph& graph,
+                                       IndexedForwardGraph::Node* sp,
                                        IndexedForwardGraph::Node* predecessor,
                                        std::unordered_set<IndexedForwardGraph::Node*>* block) {
   LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
@@ -524,11 +577,17 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
+  // Structural gate: mirror of FuseSuccessor's convexity check, oriented along
+  // the direct edge predecessor -> sp.
+  if (!CheckEdgeConvexity(graph, predecessor, sp)) {
+    LOG(INFO) << "    skipped: merge would break group convexity";
+    return;
+  }
   CommitFuseEdge(predecessor, sp, relation);
   block->insert(predecessor);
   // Recurse into the fused predecessor to extend the chain past one hop.
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
-    FusePredecessor(predecessor, link->value.node, block);
+    FusePredecessor(graph, predecessor, link->value.node, block);
   }
 }
 
@@ -548,11 +607,11 @@ void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
               << " bytes=" << seed->output_size;
     // head to successor
     for (auto* link = seed->outputs.head; link != nullptr; link = link->next) {
-      FuseSuccessor(seed, link->value.node, &block);
+      FuseSuccessor(graph, seed, link->value.node, &block);
     }
     // head to predecessor
     for (auto* link = seed->inputs.head; link != nullptr; link = link->next) {
-      FusePredecessor(seed, link->value.node, &block);
+      FusePredecessor(graph, seed, link->value.node, &block);
     }
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);

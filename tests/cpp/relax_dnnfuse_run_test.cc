@@ -283,3 +283,79 @@ TEST(RunDNNFusePredecessor, DerivedGroupTypeStopsChainBackward) {
   EXPECT_FALSE(SameGroup(groups, n2, n0));
   EXPECT_EQ(groups[n2->index]->FindRoot()->mapping_type, kManyToMany);
 }
+
+// --- Residual (skip-edge) topologies: the CheckEdgeConvexity gate -----------
+//
+// A residual connection gives the walk a direct edge n0 -> n2 alongside a
+// longer path n0 -> n1 -> n2. Fusing across the skip edge while n1 stays
+// outside would make the group non-convex ({n0,n2} both feeds and consumes
+// n1's path), which OperatorFuser cannot serialize into a fused function --
+// exactly the mobilenet_v2 / resnet18 InternalError from issue #12's all_6
+// run. CheckEdgeConvexity rejects such merges; the edge is retried naturally
+// if a later merge brings the branch inside.
+
+// Forward walk tries the skip edge first (it is n0's first output). The branch
+// node is opaque, so it can never join the group: the skip merge must be
+// rejected outright, in both the seed's forward walk and the follow-up seed
+// n2's backward walk.
+/*
+      n0 (seed) ── n1 (opaque) ── n2
+        └───────── skip ─────────┘
+*/
+TEST(RunDNNFuseSuccessor, ResidualSkipAroundOpaqueBranchStaysUnfused) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kOneToOne, 10);  // smallest output -> seed
+  auto* n1 = b.AddNode(kMappingOpaque, 20);
+  auto* n2 = b.AddNode(kOneToOne, 30);
+  b.AddEdge(n0, n2);  // skip edge first, so the walk tries it before the branch
+  b.AddEdge(n0, n1);
+  b.AddEdge(n1, n2);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_FALSE(SameGroup(groups, n0, n2));
+  EXPECT_FALSE(SameGroup(groups, n0, n1));
+  EXPECT_FALSE(SameGroup(groups, n1, n2));
+}
+
+// The backward mirror: the seed sits at the join, so FusePredecessor tries the
+// skip edge (n2's first input) before the branch. Same rejection.
+/*
+      n0 ── n1 (opaque) ── n2 (seed)
+      └────── skip ────────┘
+*/
+TEST(RunDNNFusePredecessor, ResidualSkipAroundOpaqueBranchStaysUnfused) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kOneToOne, 30);
+  auto* n1 = b.AddNode(kMappingOpaque, 20);
+  auto* n2 = b.AddNode(kOneToOne, 5);  // smallest output -> seed; the join node
+  b.AddEdge(n0, n2);  // skip edge first, so the walk tries it before the branch
+  b.AddEdge(n0, n1);
+  b.AddEdge(n1, n2);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_FALSE(SameGroup(groups, n2, n0));
+  EXPECT_FALSE(SameGroup(groups, n2, n1));
+}
+
+// The rejection is per-attempt, not permanent: with a fusable branch, the skip
+// merge is refused on the first try (n1 still outside), the branch then fuses
+// n0 -> n1, and the recursion's n1 -> n2 merge passes the convexity check --
+// after which the skip edge is internal. The whole residual block collapses
+// into one group.
+/*
+      n0 (seed) ── n1 (O2O) ── n2
+        └──────── skip ───────┘
+*/
+TEST(RunDNNFuseSuccessor, ResidualSkipFusesOnceBranchJoins) {
+  GraphBuilder b;
+  auto* n0 = b.AddNode(kOneToOne, 10);  // smallest output -> seed
+  auto* n1 = b.AddNode(kOneToOne, 20);
+  auto* n2 = b.AddNode(kOneToOne, 30);
+  b.AddEdge(n0, n2);  // skip edge first, so the walk tries it before the branch
+  b.AddEdge(n0, n1);
+  b.AddEdge(n1, n2);
+
+  auto groups = b.RunDNNFuse();
+  EXPECT_TRUE(SameGroup(groups, n0, n1));
+  EXPECT_TRUE(SameGroup(groups, n0, n2));
+}

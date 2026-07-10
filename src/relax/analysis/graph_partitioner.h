@@ -485,6 +485,28 @@ class GraphPartitioner {
    */
   void RunDNNFuse(const IndexedForwardGraph& graph);
   /*!
+   * \brief Check that fusing across the direct edge src -> sink keeps the
+   *        group partition convex (its quotient graph acyclic).
+   *
+   * Merging the two groups is illegal when some src -> sink path runs through
+   * nodes outside both groups: the merged group would then both feed and
+   * consume the excluded path (e.g. a residual skip edge fused around its own
+   * branch), and OperatorFuser cannot serialize such a group -- it emits the
+   * fused call at the group's last binding while the excluded path still
+   * reads a var whose binding moved inside, leaving the var undefined.
+   * Implemented as a forward DFS from every edge that leaves src's group into
+   * an outside node; reaching sink's group means such a path exists. The
+   * reverse direction needs no check: the partition is acyclic before the
+   * merge and the edge src -> sink exists, so a sink -> src path cannot.
+   *
+   * \param graph The indexed forward graph being partitioned.
+   * \param src The source (producer) node of the candidate edge.
+   * \param sink The sink (consumer) node of the candidate edge.
+   * \return true if the merge keeps the partition convex (fusion is legal).
+   */
+  bool CheckEdgeConvexity(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* src,
+                          IndexedForwardGraph::Node* sink);
+  /*!
    * \brief Merge src's group into sink's group across the direct edge src -> sink,
    *        and set the surviving root's mapping_type to the fused type derived
    *        from Table 3 (relation.FusedType()).
@@ -511,19 +533,23 @@ class GraphPartitioner {
    * Implements RunDNNFuse's forward expansion (DNNFusion Listing 1
    * Step 2.1-2.3), walking Node::outputs along the direct edge sp -> successor.
    * The successor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root mapping types -- the sole legality gate:
+   * the two groups' root mapping types -- the legality gate:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
-   *   - kFuseThrough: fuse.
+   *   - kFuseThrough: fuse, subject to the CheckEdgeConvexity structural gate
+   *     (skip edges whose merge would leave a sp -> successor path outside the
+   *     group; they may become fusable later once the path joins either side).
    * On success, CommitFuseEdge(sp, successor, relation) unions the two groups
    * across the edge and stamps the surviving root with Table 3's fused type,
    * the successor is added to block, and expansion recurses into its successors.
    *
+   * \param graph The indexed forward graph being partitioned.
    * \param sp The seed node whose group is being extended.
    * \param successor The forward neighbour considered for fusion.
    * \param block The accumulating set of nodes fused into the seed's block.
    */
-  void FuseSuccessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* successor,
+  void FuseSuccessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
+                     IndexedForwardGraph::Node* successor,
                      std::unordered_set<IndexedForwardGraph::Node*>* block);
   /*!
    * \brief Recursively fuse backward (predecessor) neighbours into sp's group.
@@ -534,19 +560,22 @@ class GraphPartitioner {
    * walking Node::inputs instead of Node::outputs, along the direct edge
    * predecessor -> sp.
    * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root mapping types -- the sole legality gate:
+   * the two groups' root mapping types -- the legality gate:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
-   *   - kFuseThrough: fuse.
+   *   - kFuseThrough: fuse, subject to the CheckEdgeConvexity structural gate
+   *     oriented along the direct edge predecessor -> sp.
    * On success, CommitFuseEdge(predecessor, sp, relation) unions the two groups
    * across the edge and stamps the surviving root with Table 3's fused type, the
    * predecessor is added to block, and expansion recurses into its predecessors.
    *
+   * \param graph The indexed forward graph being partitioned.
    * \param sp The seed node whose group is being extended.
    * \param predecessor The backward neighbour considered for fusion.
    * \param block The accumulating set of nodes fused into the seed's block.
    */
-  void FusePredecessor(IndexedForwardGraph::Node* sp, IndexedForwardGraph::Node* predecessor,
+  void FusePredecessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
+                       IndexedForwardGraph::Node* predecessor,
                        std::unordered_set<IndexedForwardGraph::Node*>* block);
 };
 
