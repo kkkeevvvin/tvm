@@ -101,25 +101,69 @@ class DNNFuseRelation {
    * \return The classified relation.
    */
   static DNNFuseRelation Classify(MappingType src, MappingType sink) {
-    if (src == kMappingOpaque || sink == kMappingOpaque) return DNNFuseRelation(kFuseBreak);
+    if (src == kMappingOpaque || sink == kMappingOpaque) {
+      return DNNFuseRelation(kFuseBreak, kMappingOpaque);
+    }
+    // A Table 3 cell carries both facets of the paper's encoding: the cell's
+    // color (legality: green/yellow/red -> through/depend/break) and the
+    // cell's value ("the mapping type of the operator after fusion", Table 3
+    // caption). Red cells have no fused operator; they carry kMappingOpaque as
+    // an unreachable placeholder -- IsBreak() rejects before anyone reads it.
+    struct Cell {
+      Kind kind;
+      MappingType fused;
+    };
     // DNNFusion Table 3: rows are the producer (first op), columns are the
     // consumer (second op), matching this function's (src, sink) order.
     // Indexed directly by MappingType's enum value (0..4); kMappingOpaque is
     // handled above and never reaches this table.
-    static constexpr Kind kTable[5][5] = {
-        //                sink=O2O      sink=O2M      sink=M2M      sink=Reorg    sink=Shuffle
-        /* src=O2O    */ {kFuseThrough, kFuseThrough, kFuseThrough, kFuseThrough, kFuseThrough},
-        /* src=O2M    */ {kFuseThrough, kFuseDepend, kFuseBreak, kFuseDepend, kFuseDepend},
-        /* src=M2M    */ {kFuseThrough, kFuseDepend, kFuseBreak, kFuseDepend, kFuseDepend},
-        /* src=Reorg  */ {kFuseThrough, kFuseDepend, kFuseDepend, kFuseThrough, kFuseThrough},
-        /* src=Shuffle*/ {kFuseThrough, kFuseDepend, kFuseDepend, kFuseThrough, kFuseThrough},
+    static constexpr Cell kTable[5][5] = {
+        // sink=O2O                  sink=O2M                   sink=M2M
+        // sink=Reorg                sink=Shuffle
+        /* src=O2O    */
+        {{kFuseThrough, kOneToOne},
+         {kFuseThrough, kOneToMany},
+         {kFuseThrough, kManyToMany},
+         {kFuseThrough, kReorganize},
+         {kFuseThrough, kShuffle}},
+        /* src=O2M    */
+        {{kFuseThrough, kOneToMany},
+         {kFuseDepend, kOneToMany},
+         {kFuseBreak, kMappingOpaque},
+         {kFuseDepend, kOneToMany},
+         {kFuseDepend, kOneToMany}},
+        /* src=M2M    */
+        {{kFuseThrough, kManyToMany},
+         {kFuseDepend, kManyToMany},
+         {kFuseBreak, kMappingOpaque},
+         {kFuseDepend, kManyToMany},
+         {kFuseDepend, kManyToMany}},
+        /* src=Reorg  */
+        {{kFuseThrough, kReorganize},
+         {kFuseDepend, kOneToMany},
+         {kFuseDepend, kManyToMany},
+         {kFuseThrough, kReorganize},
+         {kFuseThrough, kReorganize}},
+        /* src=Shuffle*/
+        {{kFuseThrough, kShuffle},
+         {kFuseDepend, kOneToMany},
+         {kFuseDepend, kManyToMany},
+         {kFuseThrough, kReorganize},
+         {kFuseThrough, kShuffle}},
     };
-    return DNNFuseRelation(kTable[static_cast<int>(src)][static_cast<int>(sink)]);
+    Cell cell = kTable[static_cast<int>(src)][static_cast<int>(sink)];
+    return DNNFuseRelation(cell.kind, cell.fused);
   }
 
   bool IsThrough() const { return kind_ == kFuseThrough; }
   bool IsBreak() const { return kind_ == kFuseBreak; }
   bool IsDepend() const { return kind_ == kFuseDepend; }
+
+  /*!
+   * \brief Table 3 cell value: the mapping type of the operator after fusion.
+   * \note Only meaningful when !IsBreak(); break cells hold kMappingOpaque.
+   */
+  MappingType FusedType() const { return fused_; }
 
   const char* Name() const {
     switch (kind_) {
@@ -131,8 +175,9 @@ class DNNFuseRelation {
   }
 
  private:
-  explicit DNNFuseRelation(Kind kind) : kind_(kind) {}
+  DNNFuseRelation(Kind kind, MappingType fused) : kind_(kind), fused_(fused) {}
   Kind kind_;
+  MappingType fused_;
 };
 
 /*!
