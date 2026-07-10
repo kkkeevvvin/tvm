@@ -461,6 +461,29 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
   }
 }
 
+void GraphPartitioner::CommitFuseEdge(IndexedForwardGraph::Node* src,
+                                      IndexedForwardGraph::Node* sink,
+                                      const DNNFuseRelation& relation) {
+  // Direct-edge precondition: sink must be an immediate neighbour of src.
+  bool sink_is_neighbour = false;
+  for (auto* link = src->outputs.head; link != nullptr; link = link->next) {
+    if (link->value.node == sink) {
+      sink_is_neighbour = true;
+      break;
+    }
+  }
+  ICHECK(sink_is_neighbour) << "CommitFuseEdge requires a direct edge node[" << src->index
+                            << "] -> node[" << sink->index << "]";
+  Group* src_root = groups_[src->index]->FindRoot();
+  Group* sink_root = groups_[sink->index]->FindRoot();
+  if (src_root == sink_root) return;
+  sink_root->num_nodes += src_root->num_nodes;
+  sink_root->args_num += src_root->args_num;
+  src_root->parent = sink_root;
+  // Table 3's cell value: the mapping type of the operator after fusion.
+  sink_root->mapping_type = relation.FusedType();
+}
+
 void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
                                      IndexedForwardGraph::Node* successor,
                                      std::unordered_set<IndexedForwardGraph::Node*>* block) {
@@ -477,13 +500,7 @@ void GraphPartitioner::FuseSuccessor(IndexedForwardGraph::Node* sp,
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
-  // check the constraint requirement
-  auto fcond = [](OpPatternKind kind, bool is_sink) {
-    if (is_sink) return kind <= kOutEWiseFusable;
-    return kind <= kInjective;
-  };
-  if (!CheckPath(sp, successor, fcond)) return;
-  CommitFuse(sp, successor);
+  CommitFuseEdge(sp, successor, relation);
   block->insert(successor);
   // Recurse into the fused successor to extend the chain past one hop.
   for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
@@ -507,13 +524,7 @@ void GraphPartitioner::FusePredecessor(IndexedForwardGraph::Node* sp,
   if (relation.IsBreak()) return;
   // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
   if (relation.IsDepend()) return;
-  // check the constraint requirement
-  auto fcond = [](OpPatternKind kind, bool is_sink) {
-    if (is_sink) return kind <= kOutEWiseFusable;
-    return kind <= kInjective;
-  };
-  if (!CheckPath(predecessor, sp, fcond)) return;
-  CommitFuse(predecessor, sp);
+  CommitFuseEdge(predecessor, sp, relation);
   block->insert(predecessor);
   // Recurse into the fused predecessor to extend the chain past one hop.
   for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {

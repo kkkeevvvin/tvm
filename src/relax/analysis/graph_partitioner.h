@@ -485,17 +485,39 @@ class GraphPartitioner {
    */
   void RunDNNFuse(const IndexedForwardGraph& graph);
   /*!
+   * \brief Merge src's group into sink's group across the direct edge src -> sink,
+   *        and set the surviving root's mapping_type to the fused type derived
+   *        from Table 3 (relation.FusedType()).
+   *
+   * The DNNFuse replacement for CommitFuse/MergeFromTo: the same union-find
+   * bookkeeping (num_nodes / args_num / parent), plus the fused-type
+   * derivation MergeFromTo never did. MergeFromTo's anchor_ref transfer and
+   * CombinePattern maintenance are deliberately dropped -- after a DNNF
+   * partition nothing reads Group::pattern/anchor_ref, and Table 3's red
+   * cells (M2M x M2M) are the anchor-collision rule now.
+   *
+   * \param src The source (producer) node.
+   * \param sink The sink (consumer) node.
+   * \param relation The Table 3 classification of (src, sink), already checked
+   *        legal by the caller; legality is not re-checked here.
+   * \note sink must be an immediate neighbour of src (DNNFuse only ever fuses
+   *       across one edge at a time); enforced with an ICHECK.
+   */
+  void CommitFuseEdge(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink,
+                      const DNNFuseRelation& relation);
+  /*!
    * \brief Recursively fuse forward (successor) neighbours into sp's group.
    *
    * Implements RunDNNFuse's forward expansion (DNNFusion Listing 1
-   * Step 2.1-2.3), walking Node::outputs along the data path sp -> successor.
+   * Step 2.1-2.3), walking Node::outputs along the direct edge sp -> successor.
    * The successor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root mapping types:
+   * the two groups' root mapping types -- the sole legality gate:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
-   * On success, CommitFuse(sp, successor) unions the groups along the walk, the
-   * successor is added to block, and expansion recurses into its successors.
+   * On success, CommitFuseEdge(sp, successor, relation) unions the two groups
+   * across the edge and stamps the surviving root with Table 3's fused type,
+   * the successor is added to block, and expansion recurses into its successors.
    *
    * \param sp The seed node whose group is being extended.
    * \param successor The forward neighbour considered for fusion.
@@ -509,14 +531,15 @@ class GraphPartitioner {
    * The backward mirror of FuseSuccessor. 
    *
    * Implements RunDNNFuse's backward expansion (DNNFusion Listing 1 Step 2.1-2.3),
-   * walking Node::inputs instead of Node::outputs, along the data path 
+   * walking Node::inputs instead of Node::outputs, along the direct edge
    * predecessor -> sp.
    * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
-   * the two groups' root mapping types:
+   * the two groups' root mapping types -- the sole legality gate:
    *   - kFuseBreak: reject the fusion outright.
    *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
    *   - kFuseThrough: fuse.
-   * On success, CommitFuse(predecessor, sp) unions the groups along the walk, the
+   * On success, CommitFuseEdge(predecessor, sp, relation) unions the two groups
+   * across the edge and stamps the surviving root with Table 3's fused type, the
    * predecessor is added to block, and expansion recurses into its predecessors.
    *
    * \param sp The seed node whose group is being extended.
