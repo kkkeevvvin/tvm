@@ -57,6 +57,15 @@ void ExpectDepend(MappingType src, MappingType sink) {
   EXPECT_STREQ(rel.Name(), "fuse_depend");
 }
 
+// Assert the Table 3 cell value: the mapping type of the operator after
+// fusing (src, sink). Only legal (non-break) cells carry a meaningful value.
+void ExpectFused(MappingType src, MappingType sink, MappingType fused) {
+  auto rel = DNNFuseRelation::Classify(src, sink);
+  EXPECT_FALSE(rel.IsBreak()) << "(" << src << ", " << sink << ") -> " << rel.Name();
+  EXPECT_EQ(rel.FusedType(), fused)
+      << "(" << src << ", " << sink << ") fused to " << MappingTypeName(rel.FusedType());
+}
+
 // The five non-opaque DNNFusion Table 2 mapping types, used to sweep whole
 // rows/columns of Table 3 below.
 constexpr MappingType kAllMappingTypes[] = {kOneToOne, kOneToMany, kManyToMany, kReorganize,
@@ -152,4 +161,52 @@ TEST(DNNFuseRelation, OneToManyOrManyToManyProducerIntoReorganizeOrShuffleDepend
   ExpectDepend(kOneToMany, kShuffle);
   ExpectDepend(kManyToMany, kReorganize);
   ExpectDepend(kManyToMany, kShuffle);
+}
+
+// --- FusedType: Table 3's cell value -----------------------------------------
+//
+// "The first column and the first row ... show the mapping types of first and
+// second operators, respectively, before fusion, and the colored cells show
+// the mapping type of the operator after fusion." (Table 3 caption)
+
+TEST(DNNFuseRelationFusedType, OneToOneIsAbsorbedByEitherPartner) {
+  // Fusing a One-to-One with any operator leaves the other operator's type.
+  for (MappingType other : kAllMappingTypes) {
+    ExpectFused(kOneToOne, other, other);
+    ExpectFused(other, kOneToOne, other);
+  }
+}
+
+TEST(DNNFuseRelationFusedType, OneToManyDecidesTheFusedType) {
+  // A One-to-Many operand decides the result on its own (\S3.2's
+  // "transformation impedance"); Reorganize/Shuffle absorb only One-to-One.
+  ExpectFused(kOneToMany, kOneToMany, kOneToMany);
+  ExpectFused(kOneToMany, kReorganize, kOneToMany);
+  ExpectFused(kOneToMany, kShuffle, kOneToMany);
+  ExpectFused(kReorganize, kOneToMany, kOneToMany);
+  ExpectFused(kShuffle, kOneToMany, kOneToMany);
+}
+
+TEST(DNNFuseRelationFusedType, ManyToManyDecidesTheFusedType) {
+  ExpectFused(kManyToMany, kOneToMany, kManyToMany);
+  ExpectFused(kManyToMany, kReorganize, kManyToMany);
+  ExpectFused(kManyToMany, kShuffle, kManyToMany);
+  ExpectFused(kReorganize, kManyToMany, kManyToMany);
+  ExpectFused(kShuffle, kManyToMany, kManyToMany);
+}
+
+TEST(DNNFuseRelationFusedType, ReorganizeAndShuffleCombine) {
+  ExpectFused(kReorganize, kReorganize, kReorganize);
+  ExpectFused(kReorganize, kShuffle, kReorganize);
+  ExpectFused(kShuffle, kReorganize, kReorganize);
+  ExpectFused(kShuffle, kShuffle, kShuffle);
+}
+
+TEST(DNNFuseRelationFusedType, BreakCellsCarryTheOpaquePlaceholder) {
+  // Red cells have no fused operator; FusedType() holds kMappingOpaque as an
+  // unreachable placeholder behind the IsBreak() gate.
+  EXPECT_EQ(DNNFuseRelation::Classify(kOneToMany, kManyToMany).FusedType(), kMappingOpaque);
+  EXPECT_EQ(DNNFuseRelation::Classify(kManyToMany, kManyToMany).FusedType(), kMappingOpaque);
+  EXPECT_EQ(DNNFuseRelation::Classify(kMappingOpaque, kOneToOne).FusedType(), kMappingOpaque);
+  EXPECT_EQ(DNNFuseRelation::Classify(kOneToOne, kMappingOpaque).FusedType(), kMappingOpaque);
 }
