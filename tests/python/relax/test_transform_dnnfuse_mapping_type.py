@@ -15,24 +15,9 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""issue#8: zero-divergence test for the name-keyed MappingType lookup table.
-
-Issue #6 measured that deriving DNNFusion Table 2 (\\S3.1) MappingType from TVM's
-OpPatternKind is lossy -- most visibly, broadcast elementwise ops (add/subtract/
-multiply/divide) are indistinguishable from their same-shape counterparts, since
-AnnotateTIROpPattern assigns kElemWise to both. Issue #8 replaces that proxy with
-``AnnotateTIROpMappingType``, which classifies each call_tir callee directly from
-its operator name (Table 2), with a shape check at the call site to disambiguate
-the broadcast-capable elementwise ops.
-
-This test covers exactly the op instances from issue #6 t2's agreement table (the
-15 ops -- 16 rows, since add is split into same-shape/broadcast instances -- surveyed
-across the all_6 models) and asserts the new pass agrees with Table 2 on every one of
-them, i.e. zero divergence (unlike the five "△" rows the OpPatternKind proxy left).
-"""
-
 import enum
 
+import numpy as np
 import pytest
 
 import tvm
@@ -116,6 +101,15 @@ TABLE2_OPS = [
         [_tensor([1, 4, 8, 8]), _tensor([1, 4, 1, 1])],
         relax.op.add,
     ),
+    # Broadcast against a weight (relax.Constant, e.g. a conv bias): the constant
+    # operand is ignored in the shape comparison, so the op stays One-to-One along
+    # its activation edge.
+    (
+        "add (broadcast weight)",
+        MappingType.kOneToOne,
+        [_tensor([1, 4, 8, 8])],
+        lambda x: relax.op.add(x, relax.const(np.zeros((1, 4, 1, 1), _F32))),
+    ),
     (
         "concatenate",
         MappingType.kOneToOne,
@@ -157,6 +151,12 @@ TABLE2_OPS = [
         MappingType.kOneToMany,
         [_tensor([1, 4, 8, 8]), _tensor([1, 4, 1, 1])],
         relax.op.multiply,
+    ),
+    (
+        "multiply (broadcast weight)",
+        MappingType.kOneToOne,
+        [_tensor([1, 4, 8, 8])],
+        lambda x: relax.op.multiply(x, relax.const(np.ones((1, 4, 1, 1), _F32))),
     ),
     (
         "relu",
@@ -209,6 +209,30 @@ def test_mapping_type_agrees_with_table2(name, expected, sinfos, build):
         f"{name}: mapping_type derived {derived.name}, but Table 2 says {expected.name}"
     )
 
+
+def test_weight_broadcast_via_reshape_is_one_to_one():
+    """alexnet's add[lv2] (conv bias add): from_fx routes the bias Constant through a
+    reshape binding, so the add's operand is a weight-derived var rather than a
+    Constant. The classifier must trace that back to the weight and keep the add
+    One-to-One (the pass runs before FoldConstant collapses the reshape)."""
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", _tensor([1, 4, 8, 8]))
+    bias = relax.const(np.zeros((4,), _F32))
+    with bb.function("main", [x]):
+        with bb.dataflow():
+            reshaped = bb.emit(relax.op.reshape(bias, (1, 4, 1, 1)))
+            out = bb.emit(relax.op.add(x, reshaped))
+            gv = bb.emit_output(out)
+        bb.emit_func_output(gv)
+
+    mod = relax.transform.LegalizeOps()(bb.get())
+    mod = relax.transform.AnnotateTIROpMappingType()(mod)
+    mod = relax.transform.FoldConstant()(mod)
+    types = dict(_prim_func_mapping_types(mod))
+    assert types["add"] == MappingType.kOneToOne, (
+        f"bias add classified {MappingType(types['add']).name}, expected kOneToOne"
+    )
+    assert types["reshape"] == MappingType.kReorganize
 
 if __name__ == "__main__":
     tvm.testing.main()
