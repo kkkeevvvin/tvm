@@ -32,6 +32,7 @@
  */
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/analysis.h>
+#include <tvm/relax/expr_functor.h>
 #include <tvm/relax/transform.h>
 #include <tvm/tir/function.h>
 
@@ -74,10 +75,88 @@ const std::unordered_map<std::string, MappingType>& Table2Lookup() {
 // add/subtract/multiply/divide are One-to-One when same-shape but One-to-Many when
 // broadcasting -- Table 2 cannot resolve them by name alone. DNNFusion itself
 // disambiguates these by inspecting operand shapes at the call site; we do the same
-// by comparing each input buffer's shape against the output buffer's shape.
+// by comparing each input buffer's shape against the output buffer's shape, ignoring
+// weight operands (see ConstArgMask below).
 const std::unordered_set<std::string>& BroadcastCapableOps() {
   static const std::unordered_set<std::string> ops = {"add", "subtract", "multiply", "divide"};
   return ops;
+}
+
+// Per input position of a call_tir callee: true iff every call site passes a weight
+// operand in that position. Model weights/parameters arrive as relax::Constant
+// (from_fx embeds them; this pass runs before FoldConstant) -- either directly, or
+// through a chain of bindings computed purely from Constants (e.g. from_fx emits a
+// conv bias as `reshape(bias_const, (1, -1, 1, 1))` before the bias add). A broadcast
+// against a weight is not a data-flow One-to-Many mapping in DNNFusion's sense -- the
+// mapping type describes the activation edge the fusion planner walks -- so such
+// operands are excluded from the shape comparison.
+using ConstArgMask = std::vector<bool>;
+
+std::unordered_map<const GlobalVarNode*, ConstArgMask> CollectConstArgMasks(const IRModule& mod) {
+  static const Op& call_tir_op = Op::Get("relax.call_tir");
+  static const Op& call_tir_inplace_op = Op::Get("relax.call_tir_inplace");
+
+  std::unordered_map<const GlobalVarNode*, ConstArgMask> masks;
+  for (const auto& kv : mod->functions) {
+    const auto* relax_func = kv.second.as<FunctionNode>();
+    if (relax_func == nullptr) continue;
+    const auto* seq = relax_func->body.as<SeqExprNode>();
+    if (seq == nullptr) continue;
+
+    // Vars whose value is computed purely from Constants (weight-derived). Function
+    // params and MatchCast-bound vars never enter the set, so anything touching real
+    // data drops out. Bindings are walked in def order; defs precede uses.
+    std::unordered_set<const VarNode*> const_vars;
+    auto is_weight_arg = [&const_vars](const Expr& arg) {
+      if (arg->IsInstance<ConstantNode>()) return true;
+      const auto* var = arg.as<VarNode>();
+      return var != nullptr && const_vars.count(var) > 0;
+    };
+
+    for (const BindingBlock& block : seq->blocks) {
+      for (const Binding& binding : block->bindings) {
+        const auto* var_binding = binding.as<VarBindingNode>();
+        if (var_binding == nullptr) continue;
+
+        bool const_derived = true;
+        PostOrderVisit(var_binding->value, [&](const Expr& e) {
+          const auto* var = e.as<VarNode>();
+          if (var != nullptr && const_vars.count(var) == 0) const_derived = false;
+        });
+        if (const_derived) const_vars.insert(var_binding->var.get());
+
+        const auto* call = var_binding->value.as<CallNode>();
+        if (call == nullptr || (call->op != call_tir_op && call->op != call_tir_inplace_op)) {
+          continue;
+        }
+        const auto* callee = call->args[0].as<GlobalVarNode>();
+        const auto* args = call->args[1].as<TupleNode>();
+        if (callee == nullptr || args == nullptr) continue;
+
+        ConstArgMask site(args->fields.size());
+        for (size_t i = 0; i < args->fields.size(); ++i) {
+          site[i] = is_weight_arg(args->fields[i]);
+        }
+        auto it = masks.find(callee);
+        if (it == masks.end()) {
+          masks.emplace(callee, std::move(site));
+          continue;
+        }
+        // Callee shared by several call sites: only positions that are weights at
+        // *every* site stay masked, so a shared PrimFunc never borrows another call
+        // site's weight operand.
+        ConstArgMask& merged = it->second;
+        if (merged.size() != site.size()) {
+          merged.assign(merged.size(), false);
+          continue;
+        }
+        for (size_t i = 0; i < merged.size(); ++i) {
+          merged[i] = merged[i] && site[i];
+        }
+      }
+    }
+  }
+  return masks;
 }
 
 std::string StripNumericSuffix(const ffi::String& name) {
@@ -104,7 +183,10 @@ std::optional<std::vector<int64_t>> StaticShape(const tir::Buffer& buffer) {
 // buffer's shape matches the output buffer's shape) or One-to-Many (some input is
 // broadcast); falls back to kMappingOpaque if any buffer's shape is not statically known.
 // Assumes TVM's arg-list convention of inputs followed by the (sole) output buffer.
-MappingType ClassifyElemwiseShape(const tir::PrimFunc& f) {
+// Inputs marked constant in `const_args` (weights/params at every call site) are ignored
+// in the comparison, unless every input is constant (then all inputs are compared, as a
+// fully-constant op has no activation edge to prefer -- FoldConstant erases it anyway).
+MappingType ClassifyElemwiseShape(const tir::PrimFunc& f, const ConstArgMask& const_args) {
   std::vector<std::vector<int64_t>> shapes;
   for (const tir::Var& param : f->params) {
     auto it = f->buffer_map.find(param);
@@ -115,17 +197,25 @@ MappingType ClassifyElemwiseShape(const tir::PrimFunc& f) {
   }
   if (shapes.size() < 2) return kMappingOpaque;
 
+  auto is_weight = [&](size_t i) { return i < const_args.size() && const_args[i]; };
+  bool has_data_input = false;
+  for (size_t i = 0; i + 1 < shapes.size(); ++i) {
+    if (!is_weight(i)) has_data_input = true;
+  }
+
   const std::vector<int64_t>& out_shape = shapes.back();
   for (size_t i = 0; i + 1 < shapes.size(); ++i) {
+    if (has_data_input && is_weight(i)) continue;
     if (shapes[i] != out_shape) return kOneToMany;
   }
   return kOneToOne;
 }
 
-MappingType ClassifyMappingType(const ffi::String& gvar_name, const tir::PrimFunc& f) {
+MappingType ClassifyMappingType(const ffi::String& gvar_name, const tir::PrimFunc& f,
+                                const ConstArgMask& const_args) {
   std::string stripped = StripNumericSuffix(gvar_name);
   if (BroadcastCapableOps().count(stripped)) {
-    return ClassifyElemwiseShape(f);
+    return ClassifyElemwiseShape(f, const_args);
   }
   const auto& table = Table2Lookup();
   auto it = table.find(stripped);
@@ -139,14 +229,21 @@ namespace transform {
 
 Pass AnnotateTIROpMappingType() {
   auto pass_func = [=](IRModule mod, PassContext pc) {
+    std::unordered_map<const GlobalVarNode*, ConstArgMask> const_arg_masks =
+        CollectConstArgMasks(mod);
+    static const ConstArgMask empty_mask;
+
     IRModule updates;
     for (const auto& [gvar, func] : mod->functions) {
       const auto* prim_func = func.as<tir::PrimFuncNode>();
       if (prim_func == nullptr) continue;
       if (prim_func->GetAttr<Integer>("mapping_type").has_value()) continue;
 
+      auto mask_it = const_arg_masks.find(gvar.get());
+      const ConstArgMask& const_args =
+          mask_it != const_arg_masks.end() ? mask_it->second : empty_mask;
       MappingType mapping_type =
-          ClassifyMappingType(gvar->name_hint, ffi::GetRef<tir::PrimFunc>(prim_func));
+          ClassifyMappingType(gvar->name_hint, ffi::GetRef<tir::PrimFunc>(prim_func), const_args);
       updates->Add(gvar, WithAttr(ffi::GetRef<tir::PrimFunc>(prim_func), "mapping_type",
                                    static_cast<int>(mapping_type)));
     }

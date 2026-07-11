@@ -347,11 +347,10 @@ TVM_DLL Pass RemoveUnusedOutputs();
 TVM_DLL Pass AnnotateTIROpPattern();
 
 /*!
- * \brief Annotate the DNNFusion Table 2 MappingType for TIR functions, classified
- * directly from the call_tir callee's operator name rather than derived from OpPatternKind.
- * \note It is an auto-detect pass for call_tir callees whose op name is not covered by the
- *       lookup table, the mapping_type will be "opaque" if we can't classify it. Users can
- *       manually annotate the attr `mapping_type` to prim_func.
+ * \brief Annotate DNNFusion MappingType for TIR functions from the call_tir callee name.
+ * \note Unknown callees are marked "opaque"; users can override the `mapping_type` attr.
+ * Broadcast-capable elementwise ops are disambiguated by operand shapes at the call site;
+ * weight operands are ignored in the analysis.
  * \return The Pass.
  */
 TVM_DLL Pass AnnotateTIROpMappingType();
