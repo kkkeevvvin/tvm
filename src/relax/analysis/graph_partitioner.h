@@ -31,6 +31,7 @@
 #include <tvm/relax/type.h>
 
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -415,6 +416,8 @@ class GraphPartitioner {
    *        the generated function.
    */
   const IndexedForwardGraph::Node* postpone_node_{nullptr};
+  /*! \brief Number of FuseProfit calls so far; indexes each call's tuning-record dir. */
+  size_t fuse_profit_count_{0};
   // Internal implementation of CheckPath
   template <typename F>
   bool CheckPath_(IndexedForwardGraph::Node* src, IndexedForwardGraph::Node* sink, F fcond);
@@ -611,13 +614,18 @@ class GraphPartitioner {
   void DumpNodePrimFunc(const char* label, const IndexedForwardGraph::Node* node);
   // GPU-schedule + build a node's PrimFunc on cuda and return the average
   // wall-clock latency (microseconds) over device executions; -1 on failure.
-  double TimeNode(const IndexedForwardGraph::Node* node);
+  // `record_name` names this timing target's MetaSchedule tuning-record subdir
+  // under $DNNF_PROFILER_WORKDIR (FuseProfit passes
+  // task_<index>__<names>/{block,candidate,fused}--<name>, <names> = block +
+  // candidate in producer-before-consumer order, candidate bracketed in place).
+  double TimeNode(const IndexedForwardGraph::Node* node, const std::string& record_name);
   // Build the merged PrimFunc fusing every node in `nodes` (FuseTIR over a
   // kPrimitive module) and time it on cuda; -1 if any op lacks a call_tir
   // binding or the fused kernel cannot be built. `nodes` must be in
   // producer-before-consumer order (sorted by index). The block counterpart of
-  // TimeNode.
-  double TimeFusedBlock(const std::vector<const IndexedForwardGraph::Node*>& nodes);
+  // TimeNode; `record_name` as in TimeNode.
+  double TimeFusedBlock(const std::vector<const IndexedForwardGraph::Node*>& nodes,
+                        const std::string& record_name);
   // Profile the already-fused `block` and the `candidate` op, logging the
   // group-level fused-vs-separate comparison. Returns true iff merging the
   // candidate into the block (one kernel) is faster than the block kernel plus

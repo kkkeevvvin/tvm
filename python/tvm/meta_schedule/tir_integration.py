@@ -276,6 +276,7 @@ def _ms_schedule_primfunc(
     func: tir.PrimFunc,
     target: Union[str, Target],
     max_trials: int,
+    record_name: Optional[str] = None,
 ) -> Optional[tir.PrimFunc]:
     """Tune a single PrimFunc with MetaSchedule and return the tuned PrimFunc.
 
@@ -286,8 +287,12 @@ def _ms_schedule_primfunc(
     schedule is found within the budget.
 
     The tuning database is persisted to a stable work directory so it survives
-    the run and can be inspected / reused: ``$DNNF_MS_WORKDIR`` (default
-    ``./dnnf_ms_workdir``), with a per-kernel subdirectory keyed by the
+    the run and can be inspected / reused: ``$DNNF_PROFILER_WORKDIR`` (default
+    ``./profiler_workdir``), with a per-record subdirectory named ``record_name``
+    when the caller provides one (the cost oracle passes
+    ``task_<index>__<A>_vs_<B>/{block,candidate,fused}--<name>`` — one task dir
+    per FuseProfit call, A/B = block and candidate in producer-before-consumer
+    order), else keyed by the
     PrimFunc's structural hash so structurally-identical kernels share a
     database.
 
@@ -299,6 +304,9 @@ def _ms_schedule_primfunc(
         The target to tune for.
     max_trials : int
         The MetaSchedule trial budget.
+    record_name : Optional[str]
+        Name for this kernel's tuning-record subdirectory under
+        ``$DNNF_PROFILER_WORKDIR``. Defaults to the PrimFunc's structural hash.
 
     Returns
     -------
@@ -309,8 +317,9 @@ def _ms_schedule_primfunc(
 
     if isinstance(max_trials, IntImm):
         max_trials = int(max_trials)
-    base_dir = os.environ.get("DNNF_MS_WORKDIR", os.path.join(os.getcwd(), "dnnf_ms_workdir"))
-    work_dir = os.path.join(base_dir, str(ir.structural_hash(func)))
+    base_dir = os.environ.get("DNNF_PROFILER_WORKDIR", os.path.join(os.getcwd(), "profiler_workdir"))
+    subdir = str(record_name) if record_name else str(ir.structural_hash(func))
+    work_dir = os.path.join(base_dir, subdir)
     os.makedirs(work_dir, exist_ok=True)
     database = tune_tir(
         func,
