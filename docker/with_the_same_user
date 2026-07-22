@@ -61,6 +61,15 @@ if [[ ! -z "${ROCM_ENABLED-}" ]]; then
   usermod -a -G video "${CI_BUILD_USER}"
 fi
 
+# The /dev/nvidia* device nodes injected by the NVIDIA container runtime are
+# owned by root:root, mode 660 inside this image (they don't map onto any
+# "video"/"render" group here), so the mapped-in non-root CI_BUILD_USER can't
+# open them and CUDA init fails with "Insufficient Permissions". Widen the
+# device permissions instead of adding the user to group 0.
+if compgen -G "/dev/nvidia*" > /dev/null; then
+  chmod a+rw /dev/nvidia* 2>/dev/null || true
+fi
+
 # This is a grotesque hack to get PYTEST_ADD_OPTS available to all task scripts.
 echo "${CI_BUILD_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-nopasswd-sudo
 
