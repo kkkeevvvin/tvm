@@ -39,8 +39,11 @@ void IndexedForwardGraph::DebugDump() const {
   for (size_t i = 0; i < post_dfs_order.size(); ++i) {
     Node* node = post_dfs_order[i];
     std::string bytes_str = node->output_size < 0 ? "?" : std::to_string(node->output_size);
-    os << "node[" << i << "], " << ffi::GetRef<ObjectRef>(node->ref)
-       << " mapping=" << MappingTypeName(node->mapping_type) << " bytes=" << bytes_str
+    os << "node[" << i << "], " << ffi::GetRef<ObjectRef>(node->ref);
+    if (node->gvar != nullptr) {
+      os << " gvar=" << node->gvar->name_hint;
+    }
+    os << " mapping=" << MappingTypeName(node->mapping_type) << " bytes=" << bytes_str
        << " outputs=[";
     for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
       os << link->value.node->index << ", ";

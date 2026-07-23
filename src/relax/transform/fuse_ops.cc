@@ -246,6 +246,9 @@ class GraphCreator : public ExprVisitor {
     if (op == call_tir_op_.get() || op == call_tir_inplace_op_.get()) {
       const GlobalVar& global_var = Downcast<GlobalVar>(call->args[0]);
       tir::PrimFunc func = Downcast<tir::PrimFunc>(mod_->Lookup(global_var));
+      // Cache the callee GlobalVar on the node so fusion analysis can recover
+      // the backing PrimFunc without re-walking the module's bindings.
+      binding_var_node->gvar = global_var.get();
 
       // Override args for call_tir
       args = Downcast<Tuple>(call->args[1])->fields;
