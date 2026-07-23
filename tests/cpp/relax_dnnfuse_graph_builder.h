@@ -83,7 +83,10 @@ class GraphBuilder {
   // returned Group objects are allocated from part_arena_, kept alive by this
   // builder so the caller can inspect FindRoot() after the call returns.
   std::vector<GraphPartitioner::Group*> RunDNNFuse() {
-    return DNNFGraphPartitioner(&part_arena_).Partition(graph_);
+    // Synthetic graphs carry no call_tir bindings, so an empty module is
+    // enough: FuseProfit's timing helpers fail soft (-1) and kFuseDepend
+    // edges stay unfused, matching the pre-profiler expectations.
+    return DNNFGraphPartitioner(IRModule(), &part_arena_).Partition(graph_);
   }
 
  private:

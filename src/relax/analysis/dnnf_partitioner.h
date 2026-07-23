@@ -27,9 +27,11 @@
 #ifndef TVM_RELAX_ANALYSIS_DNNF_PARTITIONER_H_
 #define TVM_RELAX_ANALYSIS_DNNF_PARTITIONER_H_
 
+#include <tvm/ir/module.h>
 #include <tvm/relax/op_attr_types.h>
 
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "../../support/arena.h"
@@ -191,7 +193,8 @@ IndexedForwardGraph::Node* FindMinOtO(
  */
 class DNNFGraphPartitioner {
  public:
-  explicit DNNFGraphPartitioner(support::Arena* arena) : arena_(arena) {}
+  explicit DNNFGraphPartitioner(IRModule mod, support::Arena* arena)
+      : mod_(std::move(mod)), arena_(arena) {}
 
   /*!
    * \brief Partition a graph using the DNNFusion-style mathematical-property
@@ -206,6 +209,8 @@ class DNNFGraphPartitioner {
                                                    int64_t profile_tune_trials = 0);
 
  private:
+  /*! \brief The IRModule the graph being partitioned was created from. */
+  IRModule mod_;
   /*! \brief The internal arena for temporary space. */
   support::Arena* arena_;
   /*! \brief The internal groups. */

@@ -1129,7 +1129,7 @@ IRModule DNNFuseOps(IRModule mod, size_t max_fuse_depth, int64_t profile_tune_tr
 
   // Step 2. Partition the graph by applying the DNNFusion-style fusion algorithm.
   std::vector<GraphPartitioner::Group*> groups =
-      DNNFGraphPartitioner(&arena).Partition(graph, profile_tune_trials);
+      DNNFGraphPartitioner(mod, &arena).Partition(graph, profile_tune_trials);
 
   // Step 3. Transform the IRModule by fusing the operators in accordance with the graph partition
   // results.
