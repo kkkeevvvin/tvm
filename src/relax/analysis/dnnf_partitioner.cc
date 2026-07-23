@@ -334,26 +334,17 @@ namespace {
 constexpr int kProfileRuns = 100;
 constexpr int kProfileRepeats = 3;
 
-// MetaSchedule trials used to schedule each profiled PrimFunc. The cost oracle
-// tunes each kernel briefly (rather than the DefaultGPUSchedule heuristic) so
-// the timed kernel reflects a tuned schedule.
-constexpr int kProfileTuneTrials = 4;
-
-// When false, skip MetaSchedule tuning entirely and schedule every profiled
-// kernel with the DefaultGPUSchedule heuristic (used for fast smoke tests). Set
-// true to tune each profiled kernel with kProfileTuneTrials MS trials.
-constexpr bool kUseMetaSchedule = true;
-
 // Schedule `func` and build it on `target`, returning the callable device
 // kernel; nullopt if scheduling or build fails. An unscheduled PrimFunc has no
 // thread bindings, so it must be scheduled before tir.build. Scheduling reads
 // Target::Current(), so build stays under the same target scope that drives the
-// host/device split. The PrimFunc is MetaSchedule-tuned (kProfileTuneTrials
-// trials) via the `relax.dnnf.MetaScheduleSchedulePrimFunc` Python helper, with
-// a DefaultGPUSchedule fallback when MS is unavailable or finds no schedule.
-// `record_name` names the tuning-record subdir under $DNNF_PROFILER_WORKDIR.
+// host/device split. The PrimFunc is MetaSchedule-tuned (`trials` trials, the
+// caller's profile_tune_trials_) via the `relax.dnnf.MetaScheduleSchedulePrimFunc`
+// Python helper, with a DefaultGPUSchedule fallback when MS is unavailable or
+// finds no schedule. `record_name` names the tuning-record subdir under
+// $DNNF_PROFILER_WORKDIR.
 ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const Target& target,
-                                              const std::string& record_name) {
+                                              const std::string& record_name, int64_t trials) {
   try {
     tvm::With<Target> target_scope(target);
     tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, ffi::String("tir_function"));
@@ -364,19 +355,16 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
 
     tir::PrimFunc scheduled;
     ffi::Optional<tir::PrimFunc> tuned;
-    if (kUseMetaSchedule) {
-      if (auto ms_schedule =
-              ffi::Function::GetGlobal("relax.dnnf.MetaScheduleSchedulePrimFunc")) {
-        ffi::Any ret = (*ms_schedule)(named, target, kProfileTuneTrials, ffi::String(record_name));
-        tuned = ret.try_cast<tir::PrimFunc>();
-      }
+    if (auto ms_schedule = ffi::Function::GetGlobal("relax.dnnf.MetaScheduleSchedulePrimFunc")) {
+      ffi::Any ret = (*ms_schedule)(named, target, trials, ffi::String(record_name));
+      tuned = ret.try_cast<tir::PrimFunc>();
     }
     if (tuned) {
       scheduled = tuned.value();
     } else {
-      // No tuned schedule (MS disabled for smoke test, MS not imported, or no
-      // valid record in the trial budget): fall back to DefaultGPUSchedule.
-      LOG(INFO) << "  MetaSchedule disabled/unavailable; DefaultGPUSchedule fallback";
+      // No tuned schedule (MS not imported, or no valid record in the trial
+      // budget): fall back to DefaultGPUSchedule.
+      LOG(INFO) << "  MetaSchedule unavailable; DefaultGPUSchedule fallback";
       m = tir::transform::DefaultGPUSchedule()(m);
       scheduled = Downcast<tir::PrimFunc>(m->Lookup(gv));
     }
@@ -467,7 +455,9 @@ double TimeKernel(const ffi::Function& kernel, const std::vector<runtime::Tensor
 // whatever target is actually driving the pass, rather than a value hardcoded
 // here (profiling a CPU target's PrimFunc with CUDA-resident args would trip
 // the device_type assert TVM's calling convention bakes into every arg).
-double TimePrimFunc(const tir::PrimFunc& func, const std::string& record_name) {
+// `trials` is the caller's profile_tune_trials_, forwarded to BuildPrimFuncGPU's
+// MetaSchedule tuning budget.
+double TimePrimFunc(const tir::PrimFunc& func, const std::string& record_name, int64_t trials) {
   Target target = Target::Current();
   ICHECK(target.defined()) << "TimePrimFunc requires a Target to be in scope "
                             << "(wrap the FuseOps() call in `with target:`)";
@@ -475,7 +465,7 @@ double TimePrimFunc(const tir::PrimFunc& func, const std::string& record_name) {
   DLDevice cpu_dev = {kDLCPU, 0};
 
   LOG(INFO) << "  PrimFunc to build:\n" << func;
-  ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target, record_name);
+  ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target, record_name, trials);
   if (!kernel) return -1.0;
   ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, dev, cpu_dev);
   if (!args) return -1.0;
@@ -659,8 +649,8 @@ double DNNFGraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node,
     return -1.0;
   }
   LOG(INFO) << "  TimeNode: " << node->gvar->name_hint;
-  return TimePrimFunc(
-      Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), record_name);
+  return TimePrimFunc(Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))),
+                      record_name, profile_tune_trials_);
 }
 
 double DNNFGraphPartitioner::TimeFusedBlock(
@@ -675,7 +665,7 @@ double DNNFGraphPartitioner::TimeFusedBlock(
     names << (i ? " + " : "") << (nodes[i]->gvar ? nodes[i]->gvar->name_hint : ffi::String("?"));
   }
   LOG(INFO) << "  TimeFusedBlock: " << names.str();
-  return TimePrimFunc(fused.value(), record_name);
+  return TimePrimFunc(fused.value(), record_name, profile_tune_trials_);
 }
 
 bool DNNFGraphPartitioner::FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate) {
