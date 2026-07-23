@@ -17,11 +17,11 @@
  * under the License.
  */
 
-// Unit tests for GraphPartitioner::FuseSuccessor / FusePredecessor, the
+// Unit tests for DNNFGraphPartitioner::FuseSuccessor / FusePredecessor, the
 // bidirectional expansion of RunDNNFuse.
 //
 // Both functions are private, so the tests drive them through the public
-// DNNFPartition() entry, which runs RunDNNFuse directly: it seeds from the
+// Partition() entry, which runs RunDNNFuse directly: it seeds from the
 // minimum-output One-to-One node (FindMinOtO) and walks forward via
 // FuseSuccessor (Node::outputs) and backward via FusePredecessor (Node::inputs).
 // We hand-build a small IndexedForwardGraph, partition it, then assert which

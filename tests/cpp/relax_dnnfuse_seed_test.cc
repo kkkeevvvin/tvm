@@ -22,7 +22,7 @@
 // with the smallest output, ties broken by the smaller node index.
 //
 // FindMinOtO is called directly on a hand-built candidate set -- no edges and
-// no DNNFPartition() run are involved. GraphBuilder is used only to allocate nodes
+// no DNNFGraphPartitioner::Partition() run are involved. GraphBuilder is used only to allocate nodes
 // with the same index-assignment rule (index == insertion order) the real
 // IndexedForwardGraph construction uses, which is what the tie-break tests
 // depend on.

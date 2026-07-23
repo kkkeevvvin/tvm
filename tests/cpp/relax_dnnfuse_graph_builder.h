@@ -20,11 +20,11 @@
 // Shared test scaffolding for the RunDNNFuse unit tests
 // (relax_dnnfuse_run_test.cc, relax_dnnfuse_seed_test.cc).
 //
-// FuseSuccessor / FusePredecessor are private to GraphPartitioner, so those
-// tests drive them through the public DNNFPartition() entry, which runs
+// FuseSuccessor / FusePredecessor are private to DNNFGraphPartitioner, so
+// those tests drive them through the public Partition() entry, which runs
 // RunDNNFuse directly. GraphBuilder hand-builds a small IndexedForwardGraph;
 // the tests partition it and assert which nodes ended up unioned into the
-// same group. FindMinOtO is declared in graph_partitioner.h and is called
+// same group. FindMinOtO is declared in dnnf_partitioner.h and is called
 // directly (the seed tests use only AddNode, for its index-assignment rule).
 
 #ifndef TVM_TESTS_CPP_RELAX_DNNFUSE_GRAPH_BUILDER_H_
@@ -34,6 +34,7 @@
 
 #include <vector>
 
+#include "../../src/relax/analysis/dnnf_partitioner.h"
 #include "../../src/relax/analysis/graph_partitioner.h"
 #include "../../src/support/arena.h"
 
@@ -50,7 +51,7 @@ class GraphBuilder {
  public:
   // Add a node with the given mapping_type/output size; its index is its
   // position in post_dfs_order, matching the indexing
-  // GraphPartitioner::groups_ relies on. Every node gets OpPatternKind
+  // DNNFGraphPartitioner::groups_ relies on. Every node gets OpPatternKind
   // kElemWise, but the DNNFuse path never consults the pattern: only
   // `mapping_type` -- which drives both seed selection (FindMinOtO looks for
   // kOneToOne) and DNNFuseRelation::Classify (DNNFusion Table 3) -- is under
@@ -78,13 +79,11 @@ class GraphBuilder {
     dst->inputs.Push(in);
   }
 
-  // Run the DNNFuse partition path via DNNFPartition. The returned Group
-  // objects are allocated from part_arena_, kept alive by this builder so the
-  // caller can inspect FindRoot() after the call returns.
+  // Run the DNNFuse partition path via DNNFGraphPartitioner::Partition. The
+  // returned Group objects are allocated from part_arena_, kept alive by this
+  // builder so the caller can inspect FindRoot() after the call returns.
   std::vector<GraphPartitioner::Group*> RunDNNFuse() {
-    GraphPartitioner partitioner(&part_arena_, /*opt_level=*/0, /*max_fuse_depth=*/256,
-                                 /*max_function_args=*/1024);
-    return partitioner.DNNFPartition(graph_);
+    return DNNFGraphPartitioner(&part_arena_).Partition(graph_);
   }
 
  private:
