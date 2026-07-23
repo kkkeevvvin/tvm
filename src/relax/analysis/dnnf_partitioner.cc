@@ -313,11 +313,32 @@ double DNNFGraphPartitioner::TimeFusedBlock(
   return -1.0;
 }
 
-bool DNNFGraphPartitioner::FuseProfit(const Block& block,
-                                      IndexedForwardGraph::Node* candidate) {
-  LOG(INFO) << "    kFuseDepend: FuseProfit prototype disabled for block_size=" << block.size()
-            << " candidate=node[" << candidate->index << "]";
-  return false;
+bool DNNFGraphPartitioner::FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate) {
+  // Group-level profit (DNNFusion §4.3.2): fuse only if `block` + `candidate` as
+  // one kernel beats them run apart. `block` excludes `candidate` and is index-
+  // ordered, so it and `if_fuse` iterate producer-before-consumer for FuseTIR.
+  Block if_fuse = block;
+  if_fuse.insert(candidate);
+  std::vector<const IndexedForwardGraph::Node*> block_nodes(block.begin(), block.end());
+  std::vector<const IndexedForwardGraph::Node*> if_fuse_nodes(if_fuse.begin(), if_fuse.end());
+
+  // Time the block alone, the candidate alone, and the block+candidate fused
+  // (any -1.0 = a PrimFunc lookup / build / timing failure).
+  double block_latency = TimeFusedBlock(block_nodes);
+  double cand_latency = TimeNode(candidate);
+  double if_fuse_latency = TimeFusedBlock(if_fuse_nodes);
+  double not_fuse_latency = block_latency + cand_latency;
+  if (block_latency < 0.0 || cand_latency < 0.0 || if_fuse_latency < 0.0) {
+    LOG(INFO) << "    profile: timing failed (block=" << block_latency << " cand=" << cand_latency
+              << " if_fuse=" << if_fuse_latency << ") - skip";
+    return false;
+  }
+
+  bool profitable = if_fuse_latency < not_fuse_latency;
+  LOG(INFO) << "    profile: if_fuse=" << if_fuse_latency << "us vs not_fuse="
+            << not_fuse_latency << "us (block=" << block_latency
+            << " cand=" << cand_latency << ") -> " << (profitable ? "fuse" : "skip");
+  return profitable;
 }
 
 }  // namespace relax
