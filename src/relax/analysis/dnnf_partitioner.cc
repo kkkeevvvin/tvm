@@ -339,7 +339,9 @@ constexpr bool kUseMetaSchedule = true;
 // host/device split. The PrimFunc is MetaSchedule-tuned (kProfileTuneTrials
 // trials) via the `relax.dnnf.MetaScheduleSchedulePrimFunc` Python helper, with
 // a DefaultGPUSchedule fallback when MS is unavailable or finds no schedule.
-ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const Target& target) {
+// `record_name` names the tuning-record subdir under $DNNF_PROFILER_WORKDIR.
+ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const Target& target,
+                                              const std::string& record_name) {
   try {
     tvm::With<Target> target_scope(target);
     tir::PrimFunc named = WithAttr(func, tvm::attr::kGlobalSymbol, ffi::String("tir_function"));
@@ -353,7 +355,7 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
     if (kUseMetaSchedule) {
       if (auto ms_schedule =
               ffi::Function::GetGlobal("relax.dnnf.MetaScheduleSchedulePrimFunc")) {
-        ffi::Any ret = (*ms_schedule)(named, target, kProfileTuneTrials);
+        ffi::Any ret = (*ms_schedule)(named, target, kProfileTuneTrials, ffi::String(record_name));
         tuned = ret.try_cast<tir::PrimFunc>();
       }
     }
@@ -449,13 +451,13 @@ double TimeKernel(const ffi::Function& kernel, const std::vector<runtime::Tensor
 // Build `func` on the GTX 1070 (BuildPrimFuncGPU), feed it random device inputs
 // (MakeRandomDeviceArgs), and time it (TimeKernel); -1 if the build fails or any
 // param cannot be materialized.
-double TimePrimFuncCUDA(const tir::PrimFunc& func) {
+double TimePrimFuncCUDA(const tir::PrimFunc& func, const std::string& record_name) {
   Target target("nvidia/geforce-gtx-1070");
   DLDevice cuda_dev = {kDLCUDA, 0};
   DLDevice cpu_dev = {kDLCPU, 0};
 
   LOG(INFO) << "  PrimFunc to build:\n" << func;
-  ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target);
+  ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target, record_name);
   if (!kernel) return -1.0;
   ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, cuda_dev, cpu_dev);
   if (!args) return -1.0;
@@ -612,20 +614,39 @@ ffi::Optional<tir::PrimFunc> BuildFusedBlock(
   return FuseTIRAndExtract(bb, fused_gv);
 }
 
+// Join the nodes' kernel names with '_' into a filesystem-safe label for
+// tuning-record directory names ("matmul_add"). If `marked` is given, its name
+// is bracketed in place ("matmul_[relu]_add").
+std::string JoinNodeNames(const std::vector<const IndexedForwardGraph::Node*>& nodes,
+                          const IndexedForwardGraph::Node* marked = nullptr) {
+  std::ostringstream names;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    ffi::String name = nodes[i]->gvar ? nodes[i]->gvar->name_hint : ffi::String("unknown");
+    names << (i ? "_" : "");
+    if (nodes[i] == marked) {
+      names << "[" << name << "]";
+    } else {
+      names << name;
+    }
+  }
+  return names.str();
+}
+
 }  // namespace
 
-double DNNFGraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node) {
+double DNNFGraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node,
+                                      const std::string& record_name) {
   if (node->gvar == nullptr) {
     LOG(INFO) << "  node has no PrimFunc; skip profiling";
     return -1.0;
   }
   LOG(INFO) << "  TimeNode: " << node->gvar->name_hint;
   return TimePrimFuncCUDA(
-      Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))));
+      Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), record_name);
 }
 
 double DNNFGraphPartitioner::TimeFusedBlock(
-    const std::vector<const IndexedForwardGraph::Node*>& nodes) {
+    const std::vector<const IndexedForwardGraph::Node*>& nodes, const std::string& record_name) {
   // Build the merged kernel fusing every node in `nodes` (FuseTIR over a
   // kPrimitive module) and time it; -1.0 if any op lacks a call_tir binding or
   // the fused PrimFunc cannot be built. The block counterpart of TimeNode.
@@ -636,7 +657,7 @@ double DNNFGraphPartitioner::TimeFusedBlock(
     names << (i ? " + " : "") << (nodes[i]->gvar ? nodes[i]->gvar->name_hint : ffi::String("?"));
   }
   LOG(INFO) << "  TimeFusedBlock: " << names.str();
-  return TimePrimFuncCUDA(fused.value());
+  return TimePrimFuncCUDA(fused.value(), record_name);
 }
 
 bool DNNFGraphPartitioner::FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate) {
@@ -649,10 +670,19 @@ bool DNNFGraphPartitioner::FuseProfit(const Block& block, IndexedForwardGraph::N
   std::vector<const IndexedForwardGraph::Node*> if_fuse_nodes(if_fuse.begin(), if_fuse.end());
 
   // Time the block alone, the candidate alone, and the block+candidate fused
-  // (any -1.0 = a PrimFunc lookup / build / timing failure).
-  double block_latency = TimeFusedBlock(block_nodes);
-  double cand_latency = TimeNode(candidate);
-  double if_fuse_latency = TimeFusedBlock(if_fuse_nodes);
+  // (any -1.0 = a PrimFunc lookup / build / timing failure). Each FuseProfit call
+  // keeps its three timing targets' tuning records under one per-call subdir of
+  // $DNNF_PROFILER_WORKDIR: task_<index>__<names>/{block,candidate,fused}--<name>,
+  // where <names> lists block + candidate in producer-before-consumer order with
+  // the candidate bracketed in place ("conv_[relu]_add").
+  std::string cand_name(candidate->gvar ? std::string(candidate->gvar->name_hint) : "unknown");
+  std::string block_name = JoinNodeNames(block_nodes);
+  std::string task_dir = "task_" + std::to_string(fuse_profit_count_++) + "__" +
+                         JoinNodeNames(if_fuse_nodes, candidate) + "/";
+  double block_latency = TimeFusedBlock(block_nodes, task_dir + "block." + block_name);
+  double cand_latency = TimeNode(candidate, task_dir + "candi." + cand_name);
+  double if_fuse_latency =
+      TimeFusedBlock(if_fuse_nodes, task_dir + "fused." + JoinNodeNames(if_fuse_nodes));
   double not_fuse_latency = block_latency + cand_latency;
   if (block_latency < 0.0 || cand_latency < 0.0 || if_fuse_latency < 0.0) {
     LOG(INFO) << "    profile: timing failed (block=" << block_latency << " cand=" << cand_latency
