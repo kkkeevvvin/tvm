@@ -222,7 +222,13 @@ void DNNFGraphPartitioner::FuseSuccessor(const IndexedForwardGraph& graph,
   }
   // kFuseDepend fusion is profit-gated: only merge when the profiler says the
   // fused kernel beats running the block and the candidate separately.
+  // profile_tune_trials_ == 0 disables profiling entirely (the default), so a
+  // kFuseDepend candidate never fuses without an explicit trial budget.
   if (relation.IsDepend()) {
+    if (profile_tune_trials_ == 0) {
+      LOG(INFO) << "    kFuseDepend: profiling disabled (profile_tune_trials=0)";
+      return;
+    }
     bool profitable = FuseProfit(*block, successor);
     if (!profitable) {
       LOG(INFO) << "    kFuseDepend: not profitable";
@@ -260,7 +266,13 @@ void DNNFGraphPartitioner::FusePredecessor(const IndexedForwardGraph& graph,
   }
   // kFuseDepend fusion is profit-gated: only merge when the profiler says the
   // fused kernel beats running the block and the candidate separately.
+  // profile_tune_trials_ == 0 disables profiling entirely (the default), so a
+  // kFuseDepend candidate never fuses without an explicit trial budget.
   if (relation.IsDepend()) {
+    if (profile_tune_trials_ == 0) {
+      LOG(INFO) << "    kFuseDepend: profiling disabled (profile_tune_trials=0)";
+      return;
+    }
     bool profitable = FuseProfit(*block, predecessor);
     if (!profitable) {
       LOG(INFO) << "    kFuseDepend: not profitable";

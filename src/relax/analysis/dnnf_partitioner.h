@@ -203,8 +203,9 @@ class DNNFGraphPartitioner {
    *        fusion algorithm: InitGroups followed by the seed-and-expand walk
    *        over mapping_type / DNNFuseRelation.
    * \param profile_tune_trials Number of profiling trials for the cost-oracle
-   *        profiling of kFuseDepend candidates; 0 disables profiling (today's
-   *        only wired value -- the profiling itself isn't implemented yet).
+   *        profiling of kFuseDepend candidates; 0 (the default) disables
+   *        profiling entirely -- FuseSuccessor / FusePredecessor skip the
+   *        FuseProfit call and never fuse a kFuseDepend candidate.
    * \return group assignments of each node.
    */
   std::vector<GraphPartitioner::Group*> Partition(const IndexedForwardGraph& graph,
