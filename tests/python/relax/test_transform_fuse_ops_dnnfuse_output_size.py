@@ -19,21 +19,22 @@
 
 The cached ``output_size`` (commit 916151140) is internal C++ state with no
 Python accessor. It is populated by ``GraphCreator::Create`` -- which runs
-*unconditionally* at the start of ``relax::FuseOps`` for every graph node,
-before any partitioning -- and read by the DNNFuse seed selector
-``FindMinOtO`` (``FuseOps(fuse_opt_level=6)``), which considers only nodes
-whose ``mapping_type`` is ``kOneToOne`` and skips nodes whose ``output_size``
-is the ``-1`` "unknown / dynamic / opaque" sentinel.
+*unconditionally* at the start of ``relax::FuseOps`` / ``relax::DNNFuseOps``
+for every graph node, before any partitioning -- and read by the DNNFuse seed
+selector ``FindMinOtO`` (``DNNFuseOps()``), which considers only nodes whose
+``mapping_type`` is ``kOneToOne`` and skips nodes whose ``output_size`` is the
+``-1`` "unknown / dynamic / opaque" sentinel.
 
 Exact byte values are pinned in the C++ unit test
 ``tests/cpp/relax_struct_info_bytes_test.cc``. These Python tests drive the
 *pass* so the population (and, for the dynamic case, the consumption) of the
 field is exercised on real Relax modules and regression-guarded:
 
-* ``fuse_opt_level=0`` builds the indexed-forward graph (computing
-  ``output_size`` for every tensor / tuple node) and then returns before
-  fusing -- a stable way to run the population path through the public API.
-* ``fuse_opt_level=6`` on an all-dynamic graph runs ``RunDNNFuse``; the relu
+* ``fuse_opt_level=0`` (via ``FuseOps``) builds the indexed-forward graph
+  (computing ``output_size`` for every tensor / tuple node) and then returns
+  before fusing -- a stable way to run the population path through the
+  public API.
+* ``DNNFuseOps()`` on an all-dynamic graph runs ``RunDNNFuse``; the relu
   node classifies ``kOneToOne`` (Table 2 is keyed on the op name, so dynamic
   shapes do not opaque it) yet carries the ``-1`` sentinel, so ``FindMinOtO``
   finds no seed and the pass completes -- exercising the sentinel-skip branch
@@ -47,8 +48,6 @@ from tvm.relax.analysis import well_formed
 
 # opt_level 0 builds the IFG (populating output_size) then skips fusion.
 BUILD_GRAPH_ONLY = 0
-# opt_level 6 selects the DNNFuse partitioner that reads output_size.
-DNNFUSE = 6
 
 
 def _annotate(mod):
@@ -117,7 +116,7 @@ def test_dnnfuse_consumer_skips_dynamic_sentinel():
     mod = _annotate(before())
     # The relu node is kOneToOne but carries the -1 sentinel, so RunDNNFuse
     # seeds nothing and the DNNFuse path completes without fusing.
-    out = relax.transform.FuseOps(fuse_opt_level=DNNFUSE)(mod)
+    out = relax.transform.DNNFuseOps()(mod)
 
     assert well_formed(out)
     assert out.get_global_var("main") is not None

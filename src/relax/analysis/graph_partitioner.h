@@ -373,10 +373,23 @@ class GraphPartitioner {
     Group* FindRoot();
   };
   /*!
-   * \brief Partition a graph.
+   * \brief Partition a graph using the classic post-dominator-tree fusion
+   *        algorithm (RunFuse, opt_level 0-3).
    * \return group assignments of each node.
    */
   std::vector<Group*> Partition(const IndexedForwardGraph& graph);
+
+  /*!
+   * \brief Partition a graph using the DNNFusion-style mathematical-property
+   *        fusion algorithm (RunDNNFuse): InitGroups followed by the
+   *        seed-and-expand walk over mapping_type / DNNFuseRelation.
+   *
+   * The dedicated entry point for relax.transform.DNNFuseOps, independent of
+   * the classic Partition()/RunFuse() path -- opt_level_ is not consulted.
+   *
+   * \return group assignments of each node.
+   */
+  std::vector<Group*> DNNFPartition(const IndexedForwardGraph& graph);
 
  private:
   /*! \brief The internal arena for temporary space. */
@@ -473,10 +486,10 @@ class GraphPartitioner {
   /*!
    * \brief Execute the DNNFusion-based fusion algorithm.
    *
-   * Alternative fusion path selected when opt_level_ == 6 (driven from Python
-   * via relax.transform.FuseOps(fuse_opt_level=6)), replacing the default
-   * 3-phase RunFuse pipeline. Instead of the dominator-tree-based grouping, it
-   * works directly off the cached pattern / mapping_type / output_size on each
+   * The body of DNNFPartition (driven from Python via
+   * relax.transform.DNNFuseOps()), an alternative to the default 3-phase
+   * RunFuse pipeline. Instead of the dominator-tree-based grouping, it works
+   * directly off the cached pattern / mapping_type / output_size on each
    * IndexedForwardGraph::Node, seeding from the smallest One-to-One operator
    * and expanding into successors / predecessors (via DNNFuseRelation::Classify
    * on mapping_type).

@@ -118,16 +118,19 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
     const IndexedForwardGraph& graph) {
   this->InitGroups(graph);
   if (opt_level_ == 0) return std::move(groups_);
-  if (opt_level_ == 6) {
-    this->RunDNNFuse(graph);
-    return std::move(groups_);
-  }
   // get post dominator tree
   auto post_dom_tree = DominatorTree::PostDom(arena_, graph);
   // run fusion algorithm.
   for (int phase = 0; phase < 3; ++phase) {
     this->RunFuse(graph, post_dom_tree, phase);
   }
+  return std::move(groups_);
+}
+
+std::vector<GraphPartitioner::Group*> GraphPartitioner::DNNFPartition(
+    const IndexedForwardGraph& graph) {
+  this->InitGroups(graph);
+  this->RunDNNFuse(graph);
   return std::move(groups_);
 }
 

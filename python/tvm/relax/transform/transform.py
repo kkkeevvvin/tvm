@@ -820,6 +820,25 @@ def FuseOps(fuse_opt_level=-1) -> tvm.ir.transform.Pass:
     return _ffi_api.FuseOps(fuse_opt_level)  # type: ignore
 
 
+def DNNFuseOps() -> tvm.ir.transform.Pass:
+    """This pass groups bindings in a dataflow block of Relax functions using DNNFusion's
+    mathematical-property-driven fusion algorithm (Niu et al., PLDI'21): a seed-and-expand walk
+    over each op's DNNFusion Table 2 MappingType (annotated by AnnotateTIROpMappingType), rather
+    than FuseOps' post-dominator-tree analysis. Otherwise mirrors FuseOps: the same grouped-
+    function substitution, and the same follow-up "FuseTIR" pass generates a TIR PrimFunc for
+    each grouped function.
+
+    Note: AnnotateTIROpMappingType must run before this pass so nodes carry a mapping_type;
+    ConvertToDataflow may need to be called first to provide dataflow blocks.
+
+    Returns
+    -------
+    ret : tvm.transform.Pass
+        The registered pass for DNNFusion-style operator fusion.
+    """
+    return _ffi_api.DNNFuseOps()  # type: ignore
+
+
 def FuseTIR() -> tvm.ir.transform.Pass:
     """Fuse primitive relax function into a larger TIR function if possible
 

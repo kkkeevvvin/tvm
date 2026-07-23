@@ -21,11 +21,11 @@
 // (relax_dnnfuse_run_test.cc, relax_dnnfuse_seed_test.cc).
 //
 // FuseSuccessor / FusePredecessor are private to GraphPartitioner, so those
-// tests drive them through the public Partition() entry: opt_level==6 routes
-// to RunDNNFuse. GraphBuilder hand-builds a small IndexedForwardGraph; the
-// tests partition it and assert which nodes ended up unioned into the same
-// group. FindMinOtO is declared in graph_partitioner.h and is called directly
-// (the seed tests use only AddNode, for its index-assignment rule).
+// tests drive them through the public DNNFPartition() entry, which runs
+// RunDNNFuse directly. GraphBuilder hand-builds a small IndexedForwardGraph;
+// the tests partition it and assert which nodes ended up unioned into the
+// same group. FindMinOtO is declared in graph_partitioner.h and is called
+// directly (the seed tests use only AddNode, for its index-assignment rule).
 
 #ifndef TVM_TESTS_CPP_RELAX_DNNFUSE_GRAPH_BUILDER_H_
 #define TVM_TESTS_CPP_RELAX_DNNFUSE_GRAPH_BUILDER_H_
@@ -78,13 +78,13 @@ class GraphBuilder {
     dst->inputs.Push(in);
   }
 
-  // Run the DNNFuse partition path (opt_level == 6). The returned Group objects
-  // are allocated from part_arena_, kept alive by this builder so the caller can
-  // inspect FindRoot() after the call returns.
+  // Run the DNNFuse partition path via DNNFPartition. The returned Group
+  // objects are allocated from part_arena_, kept alive by this builder so the
+  // caller can inspect FindRoot() after the call returns.
   std::vector<GraphPartitioner::Group*> RunDNNFuse() {
-    GraphPartitioner partitioner(&part_arena_, /*opt_level=*/6, /*max_fuse_depth=*/256,
+    GraphPartitioner partitioner(&part_arena_, /*opt_level=*/0, /*max_fuse_depth=*/256,
                                  /*max_function_args=*/1024);
-    return partitioner.Partition(graph_);
+    return partitioner.DNNFPartition(graph_);
   }
 
  private:

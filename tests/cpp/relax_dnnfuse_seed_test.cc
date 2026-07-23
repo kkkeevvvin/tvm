@@ -17,13 +17,12 @@
  * under the License.
  */
 
-// Unit tests for FindMinOtO, the RunDNNFuse seed selector (the opt_level==6
-// fusion path): among unfused kOneToOne nodes with a known (non-negative)
-// output_size it returns the one with the smallest output, ties broken by the
-// smaller node index.
+// Unit tests for FindMinOtO, the RunDNNFuse seed selector: among unfused
+// kOneToOne nodes with a known (non-negative) output_size it returns the one
+// with the smallest output, ties broken by the smaller node index.
 //
 // FindMinOtO is called directly on a hand-built candidate set -- no edges and
-// no Partition() run are involved. GraphBuilder is used only to allocate nodes
+// no DNNFPartition() run are involved. GraphBuilder is used only to allocate nodes
 // with the same index-assignment rule (index == insertion order) the real
 // IndexedForwardGraph construction uses, which is what the tie-break tests
 // depend on.
