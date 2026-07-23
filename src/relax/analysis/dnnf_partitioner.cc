@@ -194,14 +194,22 @@ void DNNFGraphPartitioner::FuseSuccessor(const IndexedForwardGraph& graph,
   LOG(INFO) << "    relation = " << relation.Name();
   // return if successor can not be fused
   if (relation.IsBreak()) return;
-  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
-  if (relation.IsDepend()) return;
   // Structural gate: skip merges that would leave a src->sink path outside the
   // group (e.g. a residual skip edge fused around its own branch). The edge may
   // become fusable later, once the branch nodes have joined either group.
   if (!CheckEdgeConvexity(graph, sp, successor)) {
     LOG(INFO) << "    skipped: merge would break group convexity";
     return;
+  }
+  // kFuseDepend fusion is profit-gated: only merge when the profiler says the
+  // fused kernel beats running the block and the candidate separately.
+  if (relation.IsDepend()) {
+    bool profitable = FuseProfit(*block, successor);
+    if (!profitable) {
+      LOG(INFO) << "    kFuseDepend: not profitable";
+      return;
+    }
+    LOG(INFO) << "    kFuseDepend: profitable";
   }
   CommitFuseEdge(sp, successor, relation);
   block->insert(successor);
@@ -226,13 +234,21 @@ void DNNFGraphPartitioner::FusePredecessor(const IndexedForwardGraph& graph,
   LOG(INFO) << "    relation = " << relation.Name();
   // return if predecessor can not be fused
   if (relation.IsBreak()) return;
-  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
-  if (relation.IsDepend()) return;
   // Structural gate: mirror of FuseSuccessor's convexity check, oriented along
   // the direct edge predecessor -> sp.
   if (!CheckEdgeConvexity(graph, predecessor, sp)) {
     LOG(INFO) << "    skipped: merge would break group convexity";
     return;
+  }
+  // kFuseDepend fusion is profit-gated: only merge when the profiler says the
+  // fused kernel beats running the block and the candidate separately.
+  if (relation.IsDepend()) {
+    bool profitable = FuseProfit(*block, predecessor);
+    if (!profitable) {
+      LOG(INFO) << "    kFuseDepend: not profitable";
+      return;
+    }
+    LOG(INFO) << "    kFuseDepend: profitable";
   }
   CommitFuseEdge(predecessor, sp, relation);
   block->insert(predecessor);
@@ -267,6 +283,13 @@ void DNNFGraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
+}
+
+bool DNNFGraphPartitioner::FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
+                                      IndexedForwardGraph::Node* candidate) {
+  LOG(INFO) << "    kFuseDepend: FuseProfit prototype disabled for block_size=" << block.size()
+            << " candidate=node[" << candidate->index << "]";
+  return false;
 }
 
 }  // namespace relax

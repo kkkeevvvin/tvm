@@ -292,7 +292,8 @@ class DNNFGraphPartitioner {
    * The successor is merged into sp's group based on DNNFuseRelation::Classify of
    * the two groups' root mapping types -- the legality gate:
    *   - kFuseBreak: reject the fusion outright.
-   *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
+   *   - kFuseDepend: profit-gated via FuseProfit; fuse only when the profiled
+   *     fused kernel beats running the block and the candidate separately.
    *   - kFuseThrough: fuse, subject to the CheckEdgeConvexity structural gate
    *     (skip edges whose merge would leave a sp -> successor path outside the
    *     group; they may become fusable later once the path joins either side).
@@ -319,7 +320,8 @@ class DNNFGraphPartitioner {
    * The predecessor is merged into sp's group based on DNNFuseRelation::Classify of
    * the two groups' root mapping types -- the legality gate:
    *   - kFuseBreak: reject the fusion outright.
-   *   - kFuseDepend: profit-gated; bail out until the profiler is implemented.
+   *   - kFuseDepend: profit-gated via FuseProfit; fuse only when the profiled
+   *     fused kernel beats running the block and the candidate separately.
    *   - kFuseThrough: fuse, subject to the CheckEdgeConvexity structural gate
    *     oriented along the direct edge predecessor -> sp.
    * On success, CommitFuseEdge(predecessor, sp, relation) unions the two groups
@@ -334,6 +336,10 @@ class DNNFGraphPartitioner {
   void FusePredecessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
                        IndexedForwardGraph::Node* predecessor,
                        std::unordered_set<IndexedForwardGraph::Node*>* block);
+  // Prototype hook for the ambiguous kFuseDepend case. Returns false until the
+  // profiling oracle is implemented.
+  bool FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
+                  IndexedForwardGraph::Node* candidate);
 };
 
 }  // namespace relax
