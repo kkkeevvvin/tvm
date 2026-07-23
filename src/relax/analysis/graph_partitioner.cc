@@ -128,7 +128,8 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
 }
 
 std::vector<GraphPartitioner::Group*> GraphPartitioner::DNNFPartition(
-    const IndexedForwardGraph& graph) {
+    const IndexedForwardGraph& graph, int64_t profile_tune_trials) {
+  profile_tune_trials_ = profile_tune_trials;
   this->InitGroups(graph);
   this->RunDNNFuse(graph);
   return std::move(groups_);

@@ -389,7 +389,8 @@ class GraphPartitioner {
    *
    * \return group assignments of each node.
    */
-  std::vector<Group*> DNNFPartition(const IndexedForwardGraph& graph);
+  std::vector<Group*> DNNFPartition(const IndexedForwardGraph& graph,
+                                    int64_t profile_tune_trials = 0);
 
  private:
   /*! \brief The internal arena for temporary space. */
@@ -400,6 +401,12 @@ class GraphPartitioner {
   size_t max_fuse_depth_;
   /*! \brief The maximum number of arguments in one fused function */
   size_t max_function_args_;
+  /*!
+   * \brief Number of profiling trials for DNNFPartition's cost-oracle
+   *        profiling of kFuseDepend candidates; 0 disables profiling.
+   *        Set via the profile_tune_trials argument to DNNFPartition().
+   */
+  int64_t profile_tune_trials_{0};
   /*! \brief The internal groups. */
   std::vector<Group*> groups_;
   /*! \brief internal field used for deduplication */

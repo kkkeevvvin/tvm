@@ -375,9 +375,11 @@ TVM_DLL Pass FuseOps(int fuse_opt_level = -1);
  * rather than the post-dominator-tree analysis FuseOps uses. Otherwise mirrors FuseOps: the
  * same grouped-function substitution, and the same follow-up "FuseTIR" pass generates a TIR
  * PrimFunc for each grouped function.
+ * \param profile_tune_trials Number of profiling trials for the cost-oracle profiling of
+ *        kFuseDepend candidates during partitioning; 0 (the default) disables profiling.
  * \return The Pass.
  */
-TVM_DLL Pass DNNFuseOps();
+TVM_DLL Pass DNNFuseOps(int64_t profile_tune_trials = 0);
 
 /*!
  * \brief The pattern object used as the input of FuseOpsByPattern. For bindings to be

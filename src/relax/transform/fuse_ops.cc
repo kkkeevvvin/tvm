@@ -1120,7 +1120,7 @@ IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth) {
   return OperatorFusor(mod, graph, groups, /*lift_constants*/ true).Transform();
 }
 
-IRModule DNNFuseOps(IRModule mod, size_t max_fuse_depth) {
+IRModule DNNFuseOps(IRModule mod, size_t max_fuse_depth, int64_t profile_tune_trials) {
   support::Arena arena;
 
   // Step 1. Create the indexed-forward graph according to the input IRModule.
@@ -1129,7 +1129,7 @@ IRModule DNNFuseOps(IRModule mod, size_t max_fuse_depth) {
   // Step 2. Partition the graph by applying the DNNFusion-style fusion algorithm.
   std::vector<GraphPartitioner::Group*> groups =
       GraphPartitioner(&arena, /*opt_level=*/0, max_fuse_depth, /*max_function_args=*/0)
-          .DNNFPartition(graph);
+          .DNNFPartition(graph, profile_tune_trials);
 
   // Step 3. Transform the IRModule by fusing the operators in accordance with the graph partition
   // results.
@@ -1535,11 +1535,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("relax.transform.FuseOps", FuseOps);
 }
 
-Pass DNNFuseOps() {
+Pass DNNFuseOps(int64_t profile_tune_trials) {
   auto pass_func =  //
       [=](IRModule m, PassContext pc) {
         auto max_fuse_depth = pc->GetConfig("relax.FuseOps.max_depth", Integer(kMaxFusedOps));
-        return relax::DNNFuseOps(m, max_fuse_depth.value().IntValue());
+        return relax::DNNFuseOps(m, max_fuse_depth.value().IntValue(), profile_tune_trials);
       };
   return CreateModulePass(/*pass_function=*/pass_func,  //
                           /*opt_level=*/0,              //
