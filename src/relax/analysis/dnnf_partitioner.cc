@@ -317,7 +317,7 @@ void DNNFGraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
 
 namespace {
 
-// Sample count for the in-pass cost oracle: TimePrimFuncCUDA averages over this
+// Sample count for the in-pass cost oracle: TimePrimFunc averages over this
 // many timed device runs (after one untimed warmup).
 constexpr int kProfileRuns = 100;
 constexpr int kProfileRepeats = 3;
@@ -380,11 +380,11 @@ ffi::Optional<ffi::Function> BuildPrimFuncGPU(const tir::PrimFunc& func, const T
 
 // Materialize one device tensor per buffer param of `func` (inputs + outputs, in
 // param order): allocate on `cpu_dev`, random-fill float32 buffers with values in
-// [-1, 1], then copy to `cuda_dev` (kernels can't be fed host pointers, and we
-// can't write GPU memory directly). nullopt if any param is not a buffer or has a
-// dynamic shape.
+// [-1, 1], then copy to `dev` (a GPU kernel can't be fed host pointers, and we
+// can't write GPU memory directly; for a CPU `dev` this CopyTo is just a host
+// copy). nullopt if any param is not a buffer or has a dynamic shape.
 ffi::Optional<std::vector<runtime::Tensor>> MakeRandomDeviceArgs(const tir::PrimFunc& func,
-                                                                 DLDevice cuda_dev,
+                                                                 DLDevice dev,
                                                                  DLDevice cpu_dev) {
   std::mt19937 rng(0);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -412,32 +412,31 @@ ffi::Optional<std::vector<runtime::Tensor>> MakeRandomDeviceArgs(const tir::Prim
       float* p = static_cast<float*>(host_t->data);
       for (int64_t i = 0; i < numel; ++i) p[i] = dist(rng);
     }
-    args.push_back(host_t.CopyTo(cuda_dev));  // CopyTo triggers a TVMSynchronize
+    args.push_back(host_t.CopyTo(dev));  // CopyTo triggers a TVMSynchronize
   }
   return args;
 }
 
 // Run `kernel` on `args` once untimed (warmup, to absorb cold-cache / first-
 // dispatch PTX-JIT cost), then time batches of kProfileRuns launches with the
-// device timer. On CUDA this uses cudaEvent elapsed time, avoiding host launch
-// and StreamSync overhead in the cost model.
+// device timer (e.g. cudaEvent elapsed time on CUDA; a host-clock timer on CPU).
 double TimeKernel(const ffi::Function& kernel, const std::vector<runtime::Tensor>& args,
-                  DLDevice cuda_dev) {
+                  DLDevice dev) {
   // Pack args once (AnyView is non-owning, so `args` must outlive the calls).
   std::vector<ffi::AnyView> packed(args.size());
   for (size_t i = 0; i < args.size(); ++i) packed[i] = args[i];
 
-  runtime::DeviceAPI* dev_api = runtime::DeviceAPI::Get(cuda_dev);
+  runtime::DeviceAPI* dev_api = runtime::DeviceAPI::Get(dev);
 
   {
     ffi::Any ret;
     kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
-    dev_api->StreamSync(cuda_dev, nullptr);
+    dev_api->StreamSync(dev, nullptr);
   }
 
   double total_us = 0.0;
   for (int repeat = 0; repeat < kProfileRepeats; ++repeat) {
-    runtime::Timer timer = runtime::Timer::Start(cuda_dev);
+    runtime::Timer timer = runtime::Timer::Start(dev);
     for (int r = 0; r < kProfileRuns; ++r) {
       ffi::Any ret;
       kernel.CallPacked(ffi::PackedArgs(packed.data(), packed.size()), &ret);
@@ -448,20 +447,27 @@ double TimeKernel(const ffi::Function& kernel, const std::vector<runtime::Tensor
   return total_us / kProfileRepeats;
 }
 
-// Build `func` on the GTX 1070 (BuildPrimFuncGPU), feed it random device inputs
-// (MakeRandomDeviceArgs), and time it (TimeKernel); -1 if the build fails or any
-// param cannot be materialized.
-double TimePrimFuncCUDA(const tir::PrimFunc& func, const std::string& record_name) {
-  Target target("nvidia/geforce-gtx-1070");
-  DLDevice cuda_dev = {kDLCUDA, 0};
+// Build `func` on the ambient Target::Current() (BuildPrimFuncGPU), feed it
+// random inputs on that target's device (MakeRandomDeviceArgs), and time it
+// (TimeKernel); -1 if the build fails or any param cannot be materialized.
+// Requires a Target to be in scope -- callers wrap the surrounding FuseOps()
+// call in `with target:` -- so both the build and the timing device follow
+// whatever target is actually driving the pass, rather than a value hardcoded
+// here (profiling a CPU target's PrimFunc with CUDA-resident args would trip
+// the device_type assert TVM's calling convention bakes into every arg).
+double TimePrimFunc(const tir::PrimFunc& func, const std::string& record_name) {
+  Target target = Target::Current();
+  ICHECK(target.defined()) << "TimePrimFunc requires a Target to be in scope "
+                            << "(wrap the FuseOps() call in `with target:`)";
+  DLDevice dev = {static_cast<DLDeviceType>(target->GetTargetDeviceType()), 0};
   DLDevice cpu_dev = {kDLCPU, 0};
 
   LOG(INFO) << "  PrimFunc to build:\n" << func;
   ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target, record_name);
   if (!kernel) return -1.0;
-  ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, cuda_dev, cpu_dev);
+  ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, dev, cpu_dev);
   if (!args) return -1.0;
-  return TimeKernel(kernel.value(), args.value(), cuda_dev);
+  return TimeKernel(kernel.value(), args.value(), dev);
 }
 
 // Find the call_tir Call bound to `var` in any relax function of `mod`.
@@ -641,7 +647,7 @@ double DNNFGraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node,
     return -1.0;
   }
   LOG(INFO) << "  TimeNode: " << node->gvar->name_hint;
-  return TimePrimFuncCUDA(
+  return TimePrimFunc(
       Downcast<tir::PrimFunc>(mod_->Lookup(ffi::GetRef<GlobalVar>(node->gvar))), record_name);
 }
 
@@ -657,7 +663,7 @@ double DNNFGraphPartitioner::TimeFusedBlock(
     names << (i ? " + " : "") << (nodes[i]->gvar ? nodes[i]->gvar->name_hint : ffi::String("?"));
   }
   LOG(INFO) << "  TimeFusedBlock: " << names.str();
-  return TimePrimFuncCUDA(fused.value(), record_name);
+  return TimePrimFunc(fused.value(), record_name);
 }
 
 bool DNNFGraphPartitioner::FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate) {
