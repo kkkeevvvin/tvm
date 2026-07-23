@@ -19,6 +19,9 @@
 
 #include "./dnnf_partitioner.h"
 
+#include <tvm/tir/function.h>
+
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -256,6 +259,18 @@ void DNNFGraphPartitioner::FusePredecessor(const IndexedForwardGraph& graph,
   }
 }
 
+void DNNFGraphPartitioner::DumpNodePrimFunc(const char* label,
+                                            const IndexedForwardGraph::Node* node) {
+  if (node->gvar == nullptr) {
+    LOG(INFO) << "    " << label << " node[" << node->index << "]: no PrimFunc";
+    return;
+  }
+  GlobalVar gvar = ffi::GetRef<GlobalVar>(node->gvar);
+  LOG(INFO) << "    " << label << " node[" << node->index << "] PrimFunc " << node->gvar->name_hint
+            << ":\n"
+            << Downcast<tir::PrimFunc>(mod_->Lookup(gvar));
+}
+
 void DNNFGraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   graph.DebugDump();
   // unfused_ops = all_operaters
@@ -281,6 +296,21 @@ void DNNFGraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
     // unfused_ops = unfused_ops - block
     for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
+}
+
+double DNNFGraphPartitioner::TimeNode(const IndexedForwardGraph::Node* node) {
+  LOG(INFO) << "  profiling fallback: TimeNode disabled for node[" << node->index << "]";
+  return -1.0;
+}
+
+double DNNFGraphPartitioner::TimeFusedBlock(
+    const std::vector<const IndexedForwardGraph::Node*>& nodes) {
+  std::ostringstream names;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    names << (i ? " + " : "") << (nodes[i]->gvar ? nodes[i]->gvar->name_hint : ffi::String("?"));
+  }
+  LOG(INFO) << "  profiling fallback: TimeFusedBlock disabled for " << names.str();
+  return -1.0;
 }
 
 bool DNNFGraphPartitioner::FuseProfit(const Block& block,
