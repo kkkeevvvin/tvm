@@ -181,8 +181,7 @@ void DNNFGraphPartitioner::CommitFuseEdge(IndexedForwardGraph::Node* src,
 
 void DNNFGraphPartitioner::FuseSuccessor(const IndexedForwardGraph& graph,
                                          IndexedForwardGraph::Node* sp,
-                                         IndexedForwardGraph::Node* successor,
-                                         std::unordered_set<IndexedForwardGraph::Node*>* block) {
+                                         IndexedForwardGraph::Node* successor, Block* block) {
   LOG(INFO) << "  successor of node[" << sp->index << "]:"
             << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
             << " (mapping=" << MappingTypeName(successor->mapping_type)
@@ -221,8 +220,7 @@ void DNNFGraphPartitioner::FuseSuccessor(const IndexedForwardGraph& graph,
 
 void DNNFGraphPartitioner::FusePredecessor(const IndexedForwardGraph& graph,
                                            IndexedForwardGraph::Node* sp,
-                                           IndexedForwardGraph::Node* predecessor,
-                                           std::unordered_set<IndexedForwardGraph::Node*>* block) {
+                                           IndexedForwardGraph::Node* predecessor, Block* block) {
   LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
             << " node[" << predecessor->index << "] " << ffi::GetRef<ObjectRef>(predecessor->ref)
             << " (mapping=" << MappingTypeName(predecessor->mapping_type)
@@ -268,7 +266,7 @@ void DNNFGraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   // generate seed
   while ((seed = FindMinOtO(unfused_ops)) != nullptr) {
     // block = [ seed ]
-    std::unordered_set<IndexedForwardGraph::Node*> block{seed};
+    Block block{seed};
     LOG(INFO) << "\nkOneToOne op with min output_size:"
               << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
               << " bytes=" << seed->output_size;
@@ -285,7 +283,7 @@ void DNNFGraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
   }
 }
 
-bool DNNFGraphPartitioner::FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
+bool DNNFGraphPartitioner::FuseProfit(const Block& block,
                                       IndexedForwardGraph::Node* candidate) {
   LOG(INFO) << "    kFuseDepend: FuseProfit prototype disabled for block_size=" << block.size()
             << " candidate=node[" << candidate->index << "]";

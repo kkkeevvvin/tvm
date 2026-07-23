@@ -30,6 +30,7 @@
 #include <tvm/ir/module.h>
 #include <tvm/relax/op_attr_types.h>
 
+#include <set>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -227,6 +228,20 @@ class DNNFGraphPartitioner {
   // split's design notes for the tradeoff.
   void InitGroups(const IndexedForwardGraph& graph);
 
+  // A fusion block: the set of nodes merged so far. Ordered by IFG index
+  // (== post-DFS topological order) so iteration is always producer-before-
+  // consumer, which is what TimeFusedBlock / FuseProfit need. The set dedups
+  // on insert (a diamond in the IFG can reach the same node twice); membership
+  // lookup is never used, so an ordered set fits the access pattern better than
+  // an unordered_set that would have to be copied out and re-sorted per probe.
+  struct NodeByIndex {
+    bool operator()(const IndexedForwardGraph::Node* a,
+                    const IndexedForwardGraph::Node* b) const {
+      return a->index < b->index;
+    }
+  };
+  using Block = std::set<IndexedForwardGraph::Node*, NodeByIndex>;
+
   /*!
    * \brief Execute the DNNFusion-based fusion algorithm.
    *
@@ -307,8 +322,7 @@ class DNNFGraphPartitioner {
    * \param block The accumulating set of nodes fused into the seed's block.
    */
   void FuseSuccessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
-                     IndexedForwardGraph::Node* successor,
-                     std::unordered_set<IndexedForwardGraph::Node*>* block);
+                     IndexedForwardGraph::Node* successor, Block* block);
   /*!
    * \brief Recursively fuse backward (predecessor) neighbours into sp's group.
    *
@@ -334,12 +348,10 @@ class DNNFGraphPartitioner {
    * \param block The accumulating set of nodes fused into the seed's block.
    */
   void FusePredecessor(const IndexedForwardGraph& graph, IndexedForwardGraph::Node* sp,
-                       IndexedForwardGraph::Node* predecessor,
-                       std::unordered_set<IndexedForwardGraph::Node*>* block);
+                       IndexedForwardGraph::Node* predecessor, Block* block);
   // Prototype hook for the ambiguous kFuseDepend case. Returns false until the
   // profiling oracle is implemented.
-  bool FuseProfit(const std::unordered_set<IndexedForwardGraph::Node*>& block,
-                  IndexedForwardGraph::Node* candidate);
+  bool FuseProfit(const Block& block, IndexedForwardGraph::Node* candidate);
 };
 
 }  // namespace relax
