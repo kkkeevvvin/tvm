@@ -463,8 +463,6 @@ double TimePrimFunc(const tir::PrimFunc& func, const std::string& record_name, i
                             << "(wrap the FuseOps() call in `with target:`)";
   DLDevice dev = {static_cast<DLDeviceType>(target->GetTargetDeviceType()), 0};
   DLDevice cpu_dev = {kDLCPU, 0};
-
-  LOG(INFO) << "  PrimFunc to build:\n" << func;
   ffi::Optional<ffi::Function> kernel = BuildPrimFuncGPU(func, target, record_name, trials);
   if (!kernel) return -1.0;
   ffi::Optional<std::vector<runtime::Tensor>> args = MakeRandomDeviceArgs(func, dev, cpu_dev);
