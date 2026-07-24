@@ -24,7 +24,7 @@
 #include <gtest/gtest.h>
 #include <tvm/relax/op_attr_types.h>
 
-#include "../../src/relax/analysis/graph_partitioner.h"
+#include "../../src/relax/analysis/dnnf_partitioner.h"
 
 using namespace tvm;
 using namespace tvm::relax;

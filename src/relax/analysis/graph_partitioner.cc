@@ -26,20 +26,6 @@
 namespace tvm {
 namespace relax {
 
-IndexedForwardGraph::Node* FindMinOtO(
-    const std::unordered_set<IndexedForwardGraph::Node*>& unfused_ops) {
-  IndexedForwardGraph::Node* min_node = nullptr;
-  for (IndexedForwardGraph::Node* node : unfused_ops) {
-    if (node->mapping_type != kOneToOne) continue;
-    if (node->output_size < 0) continue;
-    if (min_node == nullptr || node->output_size < min_node->output_size ||
-        (node->output_size == min_node->output_size && node->index < min_node->index)) {
-      min_node = node;
-    }
-  }
-  return min_node;
-}
-
 DominatorTree DominatorTree::PostDom(support::Arena* arena, const IndexedForwardGraph& graph) {
   DominatorTree tree;
   tree.nodes.resize(graph.post_dfs_order.size(), nullptr);
@@ -118,10 +104,6 @@ std::vector<GraphPartitioner::Group*> GraphPartitioner::Partition(
     const IndexedForwardGraph& graph) {
   this->InitGroups(graph);
   if (opt_level_ == 0) return std::move(groups_);
-  if (opt_level_ == 6) {
-    this->RunDNNFuse(graph);
-    return std::move(groups_);
-  }
   // get post dominator tree
   auto post_dom_tree = DominatorTree::PostDom(arena_, graph);
   // run fusion algorithm.
@@ -458,163 +440,6 @@ void GraphPartitioner::RunFuse(const IndexedForwardGraph& graph,    //
       // do nothing.
       ICHECK(group_node->pattern == kCommReduce);
     }
-  }
-}
-
-bool GraphPartitioner::CheckEdgeConvexity(const IndexedForwardGraph& graph,
-                                          IndexedForwardGraph::Node* src,
-                                          IndexedForwardGraph::Node* sink) {
-  Group* src_root = groups_[src->index]->FindRoot();
-  Group* sink_root = groups_[sink->index]->FindRoot();
-  if (src_root == sink_root) return true;
-  const size_t num_nodes = graph.post_dfs_order.size();
-  // Membership masks of the two groups about to merge.
-  std::vector<bool> in_src(num_nodes, false);
-  std::vector<bool> in_sink(num_nodes, false);
-  for (size_t i = 0; i < num_nodes; ++i) {
-    Group* root = groups_[i]->FindRoot();
-    if (root == src_root) in_src[i] = true;
-    if (root == sink_root) in_sink[i] = true;
-  }
-  // DFS forward from every edge that leaves src's group into an outside node.
-  // Reaching sink's group means some src->sink path runs through nodes the
-  // merged group would exclude, i.e. the merge would make the partition
-  // quotient cyclic. (The reverse direction needs no check: the partition is
-  // acyclic so far and the direct edge src->sink already exists, so a
-  // sink->src path cannot.)
-  std::vector<bool> visited(num_nodes, false);
-  std::vector<IndexedForwardGraph::Node*> stack;
-  for (size_t i = 0; i < num_nodes; ++i) {
-    if (!in_src[i]) continue;
-    for (auto* link = graph.post_dfs_order[i]->outputs.head; link != nullptr; link = link->next) {
-      IndexedForwardGraph::Node* out = link->value.node;
-      if (!in_src[out->index] && !in_sink[out->index]) stack.push_back(out);
-    }
-  }
-  while (!stack.empty()) {
-    IndexedForwardGraph::Node* node = stack.back();
-    stack.pop_back();
-    if (visited[node->index]) continue;
-    visited[node->index] = true;
-    for (auto* link = node->outputs.head; link != nullptr; link = link->next) {
-      IndexedForwardGraph::Node* out = link->value.node;
-      if (in_sink[out->index]) return false;
-      if (!in_src[out->index] && !visited[out->index]) stack.push_back(out);
-    }
-  }
-  return true;
-}
-
-void GraphPartitioner::CommitFuseEdge(IndexedForwardGraph::Node* src,
-                                      IndexedForwardGraph::Node* sink,
-                                      const DNNFuseRelation& relation) {
-  // Direct-edge precondition: sink must be an immediate neighbour of src.
-  bool sink_is_neighbour = false;
-  for (auto* link = src->outputs.head; link != nullptr; link = link->next) {
-    if (link->value.node == sink) {
-      sink_is_neighbour = true;
-      break;
-    }
-  }
-  ICHECK(sink_is_neighbour) << "CommitFuseEdge requires a direct edge node[" << src->index
-                            << "] -> node[" << sink->index << "]";
-  Group* src_root = groups_[src->index]->FindRoot();
-  Group* sink_root = groups_[sink->index]->FindRoot();
-  if (src_root == sink_root) return;
-  sink_root->num_nodes += src_root->num_nodes;
-  sink_root->args_num += src_root->args_num;
-  src_root->parent = sink_root;
-  // Table 3's cell value: the mapping type of the operator after fusion.
-  sink_root->mapping_type = relation.FusedType();
-}
-
-void GraphPartitioner::FuseSuccessor(const IndexedForwardGraph& graph,
-                                     IndexedForwardGraph::Node* sp,
-                                     IndexedForwardGraph::Node* successor,
-                                     std::unordered_set<IndexedForwardGraph::Node*>* block) {
-  LOG(INFO) << "  successor of node[" << sp->index << "]:"
-            << " node[" << successor->index << "] " << ffi::GetRef<ObjectRef>(successor->ref)
-            << " (mapping=" << MappingTypeName(successor->mapping_type)
-            << ", bytes=" << successor->output_size << ")";
-  // check the mapping relationship
-  MappingType sp_map = groups_[sp->index]->FindRoot()->mapping_type;
-  MappingType succ_map = groups_[successor->index]->FindRoot()->mapping_type;
-  DNNFuseRelation relation = DNNFuseRelation::Classify(sp_map, succ_map);
-  LOG(INFO) << "    relation = " << relation.Name();
-  // return if successor can not be fused
-  if (relation.IsBreak()) return;
-  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
-  if (relation.IsDepend()) return;
-  // Structural gate: skip merges that would leave a src->sink path outside the
-  // group (e.g. a residual skip edge fused around its own branch). The edge may
-  // become fusable later, once the branch nodes have joined either group.
-  if (!CheckEdgeConvexity(graph, sp, successor)) {
-    LOG(INFO) << "    skipped: merge would break group convexity";
-    return;
-  }
-  CommitFuseEdge(sp, successor, relation);
-  block->insert(successor);
-  // Recurse into the fused successor to extend the chain past one hop.
-  for (auto* link = successor->outputs.head; link != nullptr; link = link->next) {
-    FuseSuccessor(graph, successor, link->value.node, block);
-  }
-}
-
-void GraphPartitioner::FusePredecessor(const IndexedForwardGraph& graph,
-                                       IndexedForwardGraph::Node* sp,
-                                       IndexedForwardGraph::Node* predecessor,
-                                       std::unordered_set<IndexedForwardGraph::Node*>* block) {
-  LOG(INFO) << "  predecessor of node[" << sp->index << "]:"
-            << " node[" << predecessor->index << "] " << ffi::GetRef<ObjectRef>(predecessor->ref)
-            << " (mapping=" << MappingTypeName(predecessor->mapping_type)
-            << ", bytes=" << predecessor->output_size << ")";
-  // check the mapping relationship
-  MappingType sp_map = groups_[sp->index]->FindRoot()->mapping_type;
-  MappingType pred_map = groups_[predecessor->index]->FindRoot()->mapping_type;
-  DNNFuseRelation relation = DNNFuseRelation::Classify(pred_map, sp_map);
-  LOG(INFO) << "    relation = " << relation.Name();
-  // return if predecessor can not be fused
-  if (relation.IsBreak()) return;
-  // TODO: kFuseDepend fusion is profit-gated -- bail out until the profiler is implemented
-  if (relation.IsDepend()) return;
-  // Structural gate: mirror of FuseSuccessor's convexity check, oriented along
-  // the direct edge predecessor -> sp.
-  if (!CheckEdgeConvexity(graph, predecessor, sp)) {
-    LOG(INFO) << "    skipped: merge would break group convexity";
-    return;
-  }
-  CommitFuseEdge(predecessor, sp, relation);
-  block->insert(predecessor);
-  // Recurse into the fused predecessor to extend the chain past one hop.
-  for (auto* link = predecessor->inputs.head; link != nullptr; link = link->next) {
-    FusePredecessor(graph, predecessor, link->value.node, block);
-  }
-}
-
-void GraphPartitioner::RunDNNFuse(const IndexedForwardGraph& graph) {
-  graph.DebugDump();
-  // unfused_ops = all_operaters
-  std::unordered_set<IndexedForwardGraph::Node*> unfused_ops(
-      graph.post_dfs_order.begin(), graph.post_dfs_order.end());
-  LOG(INFO) << "unfused_ops: " << unfused_ops.size() << " nodes";
-  IndexedForwardGraph::Node* seed = nullptr;
-  // generate seed
-  while ((seed = FindMinOtO(unfused_ops)) != nullptr) {
-    // block = [ seed ]
-    std::unordered_set<IndexedForwardGraph::Node*> block{seed};
-    LOG(INFO) << "\nkOneToOne op with min output_size:"
-              << " node[" << seed->index << "], " << ffi::GetRef<ObjectRef>(seed->ref)
-              << " bytes=" << seed->output_size;
-    // head to successor
-    for (auto* link = seed->outputs.head; link != nullptr; link = link->next) {
-      FuseSuccessor(graph, seed, link->value.node, &block);
-    }
-    // head to predecessor
-    for (auto* link = seed->inputs.head; link != nullptr; link = link->next) {
-      FusePredecessor(graph, seed, link->value.node, &block);
-    }
-    // unfused_ops = unfused_ops - block
-    for (IndexedForwardGraph::Node* op : block) unfused_ops.erase(op);
   }
 }
 

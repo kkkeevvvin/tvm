@@ -33,6 +33,7 @@ from .transform import (
     ComputePrimValue,
     ConvertLayout,
     ConvertToDataflow,
+    DNNFuseOps,
     DataflowBlockPass,
     DataflowUseInplaceCalls,
     DeadCodeElimination,

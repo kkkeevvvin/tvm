@@ -369,6 +369,19 @@ TVM_DLL Pass AnnotateTIROpMappingType();
 TVM_DLL Pass FuseOps(int fuse_opt_level = -1);
 
 /*!
+ * \brief Groups bindings in a dataflow block of Relax functions using DNNFusion's
+ * mathematical-property-driven fusion algorithm (Niu et al., PLDI'21): a seed-and-expand
+ * walk over each op's DNNFusion Table 2 MappingType (annotated by AnnotateTIROpMappingType),
+ * rather than the post-dominator-tree analysis FuseOps uses. Otherwise mirrors FuseOps: the
+ * same grouped-function substitution, and the same follow-up "FuseTIR" pass generates a TIR
+ * PrimFunc for each grouped function.
+ * \param profile_tune_trials Number of profiling trials for the cost-oracle profiling of
+ *        kFuseDepend candidates during partitioning; 0 (the default) disables profiling.
+ * \return The Pass.
+ */
+TVM_DLL Pass DNNFuseOps(int64_t profile_tune_trials = 0);
+
+/*!
  * \brief The pattern object used as the input of FuseOpsByPattern. For bindings to be
  * fused, it needs to be matched with `pattern` and the `check` function needs to return
  * true.

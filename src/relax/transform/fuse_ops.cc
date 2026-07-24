@@ -41,6 +41,7 @@
 #include <optional>
 
 #include "../../support/arena.h"
+#include "../analysis/dnnf_partitioner.h"
 #include "../analysis/graph_partitioner.h"
 #include "tvm/relax/expr.h"
 #include "utils.h"
@@ -245,6 +246,9 @@ class GraphCreator : public ExprVisitor {
     if (op == call_tir_op_.get() || op == call_tir_inplace_op_.get()) {
       const GlobalVar& global_var = Downcast<GlobalVar>(call->args[0]);
       tir::PrimFunc func = Downcast<tir::PrimFunc>(mod_->Lookup(global_var));
+      // Cache the callee GlobalVar on the node so fusion analysis can recover
+      // the backing PrimFunc without re-walking the module's bindings.
+      binding_var_node->gvar = global_var.get();
 
       // Override args for call_tir
       args = Downcast<Tuple>(call->args[1])->fields;
@@ -257,8 +261,8 @@ class GraphCreator : public ExprVisitor {
       }
 
       // The DNNFusion Table 2 mapping type, annotated by AnnotateTIROpMappingType; used
-      // only by RunDNNFuse (opt_level 6). Absent (e.g. AnnotateTIROpMappingType did not
-      // run) means kMappingOpaque, the node's default.
+      // only by RunDNNFuse (relax.transform.DNNFuseOps). Absent (e.g. AnnotateTIROpMappingType
+      // did not run) means kMappingOpaque, the node's default.
       ffi::Optional<Integer> opt_mapping_type = func->GetAttr<Integer>("mapping_type");
       if (opt_mapping_type.defined()) {
         SetNodeMappingType(binding_var_node,
@@ -417,9 +421,9 @@ class GraphCreator : public ExprVisitor {
 
   /*!
    * \brief Set the DNNFusion Table 2 mapping type of the input node, used only by
-   * RunDNNFuse (opt_level 6). Unlike SetNodePattern, this is not required to be called
-   * for every node -- nodes that are not call_tir to an AnnotateTIROpMappingType-annotated
-   * PrimFunc keep the node's default of kMappingOpaque.
+   * RunDNNFuse (relax.transform.DNNFuseOps). Unlike SetNodePattern, this is not required to
+   * be called for every node -- nodes that are not call_tir to an AnnotateTIROpMappingType-
+   * annotated PrimFunc keep the node's default of kMappingOpaque.
    * \param node The graph node to be set
    * \param mapping_type The mapping type of the node
    */
@@ -1120,6 +1124,21 @@ IRModule FuseOps(IRModule mod, int opt_level, size_t max_fuse_depth) {
   return OperatorFusor(mod, graph, groups, /*lift_constants*/ true).Transform();
 }
 
+IRModule DNNFuseOps(IRModule mod, size_t max_fuse_depth, int64_t profile_tune_trials) {
+  support::Arena arena;
+
+  // Step 1. Create the indexed-forward graph according to the input IRModule.
+  IndexedForwardGraph graph = GraphCreator::Create(mod, &arena);
+
+  // Step 2. Partition the graph by applying the DNNFusion-style fusion algorithm.
+  std::vector<GraphPartitioner::Group*> groups =
+      DNNFGraphPartitioner(mod, &arena).Partition(graph, profile_tune_trials);
+
+  // Step 3. Transform the IRModule by fusing the operators in accordance with the graph partition
+  // results.
+  return OperatorFusor(mod, graph, groups, /*lift_constants*/ true).Transform();
+}
+
 IRModule MakeGroupedFunctions(
     IRModule mod, const std::unordered_map<const Object*, GraphPartitioner::Group*>& partition,
     bool lift_constants, const ffi::Array<ffi::String>& entry_function_names) {
@@ -1517,6 +1536,23 @@ Pass FuseOps(int fuse_opt_level) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("relax.transform.FuseOps", FuseOps);
+}
+
+Pass DNNFuseOps(int64_t profile_tune_trials) {
+  auto pass_func =  //
+      [=](IRModule m, PassContext pc) {
+        auto max_fuse_depth = pc->GetConfig("relax.FuseOps.max_depth", Integer(kMaxFusedOps));
+        return relax::DNNFuseOps(m, max_fuse_depth.value().IntValue(), profile_tune_trials);
+      };
+  return CreateModulePass(/*pass_function=*/pass_func,  //
+                          /*opt_level=*/0,              //
+                          /*name=*/"DNNFuseOps",        //
+                          /*required=*/{});
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("relax.transform.DNNFuseOps", DNNFuseOps);
 }
 
 Pass FuseOpsByPattern(const tvm::ffi::Array<FusionPattern>& patterns, bool bind_constants,
