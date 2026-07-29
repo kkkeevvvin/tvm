@@ -49,35 +49,85 @@ namespace relax {
 namespace {
 
 // Table 2 (DNNFusion, \S3.1), restricted to the op set surveyed in issue #6 t1 (all_6
-// models) plus the ops issue #37 found uncovered on the paper_6 models (vgg16, unet,
-// c3d, s3d, mobilenet_v1_ssd, yolov4) -- both surveys run the model through
+// models), the ops issue #37 found uncovered on the paper_6 models (vgg16, unet,
+// c3d, s3d, mobilenet_v1_ssd, yolov4), and the ops issue #38 found uncovered on the
+// paleo models (effv2_s, regnetY, rs_rs50, cnxtv2, vit_L, vit_H, deit3, beit,
+// swinv2, eva02) -- all these surveys run the model through
 // DecomposeOpsForInference -> LegalizeOps -> AnnotateTIROpPattern -> FoldConstant.
 // Keyed on the call_tir callee's GlobalVar name with the numeric dedup suffix stripped.
-// add/subtract/multiply/divide are deliberately absent -- see BroadcastCapableOps below.
+// add/subtract/multiply/divide/maximum/power are deliberately absent -- see
+// BroadcastCapableOps below.
 const std::unordered_map<std::string, MappingType>& Table2Lookup() {
   static const std::unordered_map<std::string, MappingType> table = {
       {"adaptive_avg_pool2d", kManyToMany},
+      // relax.nn.attention / attention_bias legalize to a single PrimFunc computing
+      // softmax(Q*K^T/sqrt(d))*V, so every output element reads a whole row of the
+      // scores plus a whole column of V -- Many-to-Many, like Table 2's Softmax and
+      // MatMul (of which this is a composition). No ONNX counterpart in Table 2.
+      {"attention", kManyToMany},
+      {"attention_bias", kManyToMany},
+      {"avg_pool2d", kManyToMany},
       {"avg_pool3d", kManyToMany},
+      // Cast: one output element from the one input element at the same index.
+      {"cast", kOneToOne},
       {"concatenate", kOneToOne},
       {"conv2d", kManyToMany},
       {"conv2d_transpose", kManyToMany},
       {"conv3d", kManyToMany},
+      // Gelu postdates the paper as an ONNX op (opset 20), so Table 2 does not list
+      // it, but 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3))) is a pure scalar
+      // function of the input element at the same index -- One-to-One, like Table 2's
+      // Relu/Sigmoid/Tanh row.
+      {"gelu", kOneToOne},
+      // LayerNormalization postdates the paper (ONNX opset 17), so Table 2 does not
+      // list it, but its two listed siblings settle it: BatchNormalization is
+      // One-to-One (inference-time stats are constants, so it degenerates to a
+      // per-element affine -- and DecomposeOpsForInference rewrites it away before
+      // this pass), whereas InstanceNormalization is Many-to-Many because its
+      // mean/variance are runtime reductions over the input. layer_norm is the
+      // latter: every output element of a normalized row reads the whole row (the
+      // Many-to-Many form y[e] = F(x[f_1(d)], ..., x[f_k(d)])), and Table 2 already
+      // puts both Reduce and Softmax -- the same read pattern -- in Many-to-Many.
+      // gamma/beta are One-to-Many broadcasts, but \S3.1's "decided by the more
+      // complex mapping type" rule keeps the verdict at Many-to-Many.
+      {"layer_norm", kManyToMany},
       {"leaky_relu", kOneToOne},
       {"matmul", kManyToMany},
       {"max_pool2d", kManyToMany},
       {"max_pool3d", kManyToMany},
       {"mean", kManyToMany},
+      // pad/split/squeeze/strided_slice (ONNX Pad/Split/Squeeze/Slice) are all pure
+      // data movement: every output element is a copy of at most one input element at
+      // a remapped index, with no value change -- Table 2's Reorganize row, same as
+      // reshape.
+      {"pad", kReorganize},
       {"relu", kOneToOne},
       {"reshape", kReorganize},
       {"resize2d", kOneToMany},
       // silu has no ONNX counterpart; ONNX expresses it as Sigmoid + Mul (both
       // One-to-One same-shape), so the composite is effectively One-to-One.
       {"silu", kOneToOne},
+      // Softmax: the row sum makes every output element read the whole normalized
+      // row -- Many-to-Many, as Table 2 lists it.
+      {"softmax", kManyToMany},
       // softplus is not listed in Table 2, but softplus(x) = log(1 + exp(beta*x)) / beta
       // reads each input element exactly once at the same position -- One-to-One.
       {"softplus", kOneToOne},
+      {"split", kReorganize},
+      {"squeeze", kReorganize},
+      // stack has no single ONNX counterpart (it is Unsqueeze + Concat); like
+      // concatenate it copies each input element to one output position without
+      // changing its value, so it follows concatenate's One-to-One verdict.
+      {"stack", kOneToOne},
+      {"strided_slice", kReorganize},
+      // ReduceSum, same row as Table 2's Reduce -- every output element reads a whole
+      // slice of the input.
+      {"sum", kManyToMany},
+      {"tir_abs", kOneToOne},
       {"tir_clip", kOneToOne},
+      {"tir_negative", kOneToOne},
       {"tir_sigmoid", kOneToOne},
+      {"tir_sqrt", kOneToOne},
       {"tir_tanh", kOneToOne},
       // relax.permute_dims legalizes to topi.transpose, whose PrimFunc is named
       // "transpose": an axis-permuting reindex, i.e. Table 2's Shuffle.
@@ -86,13 +136,15 @@ const std::unordered_map<std::string, MappingType>& Table2Lookup() {
   return table;
 }
 
-// add/subtract/multiply/divide are One-to-One when same-shape but One-to-Many when
-// broadcasting -- Table 2 cannot resolve them by name alone. DNNFusion itself
-// disambiguates these by inspecting operand shapes at the call site; we do the same
-// by comparing each input buffer's shape against the output buffer's shape, ignoring
-// weight operands (see ConstArgMask below).
+// add/subtract/multiply/divide/maximum/power (ONNX Add/Sub/Mul/Div/Max/Pow) are
+// One-to-One when same-shape but One-to-Many when broadcasting -- Table 2 cannot
+// resolve them by name alone. DNNFusion itself disambiguates these by inspecting
+// operand shapes at the call site; we do the same by comparing each input buffer's
+// shape against the output buffer's shape, ignoring weight operands (see ConstArgMask
+// below).
 const std::unordered_set<std::string>& BroadcastCapableOps() {
-  static const std::unordered_set<std::string> ops = {"add", "subtract", "multiply", "divide"};
+  static const std::unordered_set<std::string> ops = {"add",    "subtract", "multiply",
+                                                      "divide", "maximum",  "power"};
   return ops;
 }
 

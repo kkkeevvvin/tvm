@@ -80,9 +80,12 @@ def derive_mapping_type(sinfos, build) -> MappingType:
 
 _F32 = "float32"
 
-# (name, expected Table 2 type, input StructInfos, build_fn) for the 24 ops (27 rows)
-# covered by the lookup table: issue #6 t1 (all_6 models) plus the ops issue #37 found
-# uncovered on the paper_6 models. build_fn returns the op call.
+_F16 = "float16"
+
+# (name, expected Table 2 type, input StructInfos, build_fn) for every op covered by
+# the lookup table: issue #6 t1 (all_6 models), the ops issue #37 found uncovered on
+# the paper_6 models, and the ops issue #38 found uncovered on the paleo models.
+# build_fn returns the op call.
 TABLE2_OPS = [
     (
         "adaptive_avg_pool2d",
@@ -111,11 +114,37 @@ TABLE2_OPS = [
         [_tensor([1, 4, 8, 8])],
         lambda x: relax.op.add(x, relax.const(np.zeros((1, 4, 1, 1), _F32))),
     ),
+    # BSNH layout: (batch, seq_len, num_heads, head_dim). One PrimFunc computing
+    # softmax(Q*K^T/sqrt(d))*V.
+    (
+        "attention",
+        MappingType.kManyToMany,
+        [_tensor([1, 4, 2, 8], _F16)] * 3,
+        relax.op.nn.attention,
+    ),
+    (
+        "attention_bias",
+        MappingType.kManyToMany,
+        [_tensor([1, 4, 2, 8], _F16)] * 3 + [_tensor([1, 2, 4, 4], _F16)],
+        relax.op.nn.attention,
+    ),
+    (
+        "avg_pool2d",
+        MappingType.kManyToMany,
+        [_tensor([1, 4, 8, 8])],
+        lambda x: relax.op.nn.avg_pool2d(x, pool_size=(2, 2)),
+    ),
     (
         "avg_pool3d",
         MappingType.kManyToMany,
         [_tensor([1, 4, 8, 8, 8])],
         lambda x: relax.op.nn.avg_pool3d(x, pool_size=(2, 2, 2)),
+    ),
+    (
+        "cast",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        lambda x: relax.op.astype(x, _F16),
     ),
     (
         "concatenate",
@@ -148,6 +177,23 @@ TABLE2_OPS = [
         [_tensor([1, 4, 8, 8]), _tensor([1, 4, 1, 1])],
         relax.op.divide,
     ),
+    # Not in Table 2 (Gelu is ONNX opset 20, post-paper); a pure scalar function of
+    # the element at the same index, so it lands in the Relu/Sigmoid/Tanh row.
+    (
+        "gelu",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        relax.op.nn.gelu,
+    ),
+    # Not in Table 2 (LayerNormalization is ONNX opset 17, post-paper); classified
+    # as Many-to-Many by analogy with InstanceNormalization / Reduce / Softmax --
+    # the row mean/variance make every output element read the whole normalized row.
+    (
+        "layer_norm",
+        MappingType.kManyToMany,
+        [_tensor([1, 197, 1024]), _tensor([1024]), _tensor([1024])],
+        lambda x, gamma, beta: relax.op.nn.layer_norm(x, gamma, beta, axes=[-1]),
+    ),
     # relax.nn.leakyrelu legalizes to topi.nn.leaky_relu -> PrimFunc "leaky_relu".
     (
         "leaky_relu",
@@ -160,6 +206,19 @@ TABLE2_OPS = [
         MappingType.kManyToMany,
         [_tensor([10, 20]), _tensor([20, 30])],
         relax.op.matmul,
+    ),
+    # ONNX Max/Pow: broadcast-capable binaries, resolved by operand shape like add.
+    (
+        "maximum (same-shape)",
+        MappingType.kOneToOne,
+        [_tensor([1, 4, 8, 8]), _tensor([1, 4, 8, 8])],
+        relax.op.maximum,
+    ),
+    (
+        "maximum (broadcast)",
+        MappingType.kOneToMany,
+        [_tensor([1, 4, 8, 8]), _tensor([1, 4, 1, 1])],
+        relax.op.maximum,
     ),
     (
         "max_pool2d",
@@ -191,6 +250,20 @@ TABLE2_OPS = [
         [_tensor([1, 4, 8, 8])],
         lambda x: relax.op.multiply(x, relax.const(np.ones((1, 4, 1, 1), _F32))),
     ),
+    # Constant-mode pad; the other pad_modes legalize to reflect_pad/replicate_pad/
+    # circular_pad, which the surveys never hit and the table does not cover.
+    (
+        "pad",
+        MappingType.kReorganize,
+        [_tensor([1, 4, 8, 8])],
+        lambda x: relax.op.nn.pad(x, pad_width=(0, 0, 0, 0, 1, 1, 1, 1)),
+    ),
+    (
+        "power (broadcast)",
+        MappingType.kOneToMany,
+        [_tensor([1, 4, 8, 8]), _tensor([1, 4, 1, 1])],
+        relax.op.power,
+    ),
     (
         "relu",
         MappingType.kOneToOne,
@@ -217,10 +290,40 @@ TABLE2_OPS = [
         relax.op.nn.silu,
     ),
     (
+        "softmax",
+        MappingType.kManyToMany,
+        [_tensor([10, 20])],
+        lambda x: relax.op.nn.softmax(x, axis=-1),
+    ),
+    (
         "softplus",
         MappingType.kOneToOne,
         [_tensor([10, 20])],
         relax.op.nn.softplus,
+    ),
+    (
+        "split",
+        MappingType.kReorganize,
+        [_tensor([10, 20])],
+        lambda x: relax.op.split(x, 2, axis=1),
+    ),
+    (
+        "squeeze",
+        MappingType.kReorganize,
+        [_tensor([1, 10, 20])],
+        lambda x: relax.op.squeeze(x, axis=0),
+    ),
+    (
+        "stack",
+        MappingType.kOneToOne,
+        [_tensor([10, 20]), _tensor([10, 20])],
+        lambda x, y: relax.op.stack([x, y], axis=0),
+    ),
+    (
+        "strided_slice",
+        MappingType.kReorganize,
+        [_tensor([10, 20])],
+        lambda x: relax.op.strided_slice(x, axes=[1], begin=[0], end=[10]),
     ),
     (
         "subtract (broadcast)",
@@ -229,16 +332,40 @@ TABLE2_OPS = [
         relax.op.subtract,
     ),
     (
+        "sum",
+        MappingType.kManyToMany,
+        [_tensor([10, 20])],
+        lambda x: relax.op.sum(x, axis=1),
+    ),
+    (
+        "tir_abs",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        relax.op.abs,
+    ),
+    (
         "tir_clip",
         MappingType.kOneToOne,
         [_tensor([10, 20])],
         lambda x: relax.op.clip(x, relax.PrimValue(0.0), relax.PrimValue(6.0)),
     ),
     (
+        "tir_negative",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        relax.op.negative,
+    ),
+    (
         "tir_sigmoid",
         MappingType.kOneToOne,
         [_tensor([10, 20])],
         relax.op.sigmoid,
+    ),
+    (
+        "tir_sqrt",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        relax.op.sqrt,
     ),
     (
         "tir_tanh",
