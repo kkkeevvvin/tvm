@@ -49,25 +49,39 @@ namespace relax {
 namespace {
 
 // Table 2 (DNNFusion, \S3.1), restricted to the op set surveyed in issue #6 t1 (all_6
-// models run through DecomposeOpsForInference -> LegalizeOps -> AnnotateTIROpPattern ->
-// FoldConstant). Keyed on the call_tir callee's GlobalVar name with the numeric dedup
-// suffix stripped. add/subtract/multiply/divide are deliberately absent -- see
-// BroadcastCapableOps below.
+// models) plus the ops issue #37 found uncovered on the paper_6 models (vgg16, unet,
+// c3d, s3d, mobilenet_v1_ssd, yolov4) -- both surveys run the model through
+// DecomposeOpsForInference -> LegalizeOps -> AnnotateTIROpPattern -> FoldConstant.
+// Keyed on the call_tir callee's GlobalVar name with the numeric dedup suffix stripped.
+// add/subtract/multiply/divide are deliberately absent -- see BroadcastCapableOps below.
 const std::unordered_map<std::string, MappingType>& Table2Lookup() {
   static const std::unordered_map<std::string, MappingType> table = {
       {"adaptive_avg_pool2d", kManyToMany},
+      {"avg_pool3d", kManyToMany},
       {"concatenate", kOneToOne},
       {"conv2d", kManyToMany},
+      {"conv2d_transpose", kManyToMany},
+      {"conv3d", kManyToMany},
+      {"leaky_relu", kOneToOne},
       {"matmul", kManyToMany},
       {"max_pool2d", kManyToMany},
+      {"max_pool3d", kManyToMany},
       {"mean", kManyToMany},
       {"relu", kOneToOne},
       {"reshape", kReorganize},
+      {"resize2d", kOneToMany},
       // silu has no ONNX counterpart; ONNX expresses it as Sigmoid + Mul (both
       // One-to-One same-shape), so the composite is effectively One-to-One.
       {"silu", kOneToOne},
+      // softplus is not listed in Table 2, but softplus(x) = log(1 + exp(beta*x)) / beta
+      // reads each input element exactly once at the same position -- One-to-One.
+      {"softplus", kOneToOne},
       {"tir_clip", kOneToOne},
       {"tir_sigmoid", kOneToOne},
+      {"tir_tanh", kOneToOne},
+      // relax.permute_dims legalizes to topi.transpose, whose PrimFunc is named
+      // "transpose": an axis-permuting reindex, i.e. Table 2's Shuffle.
+      {"transpose", kShuffle},
   };
   return table;
 }

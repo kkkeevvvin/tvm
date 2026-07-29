@@ -80,8 +80,9 @@ def derive_mapping_type(sinfos, build) -> MappingType:
 
 _F32 = "float32"
 
-# (name, expected Table 2 type, input StructInfos, build_fn) for the 15 ops (16 rows)
-# in issue #6 t1 coverage. build_fn returns the op call.
+# (name, expected Table 2 type, input StructInfos, build_fn) for the 24 ops (27 rows)
+# covered by the lookup table: issue #6 t1 (all_6 models) plus the ops issue #37 found
+# uncovered on the paper_6 models. build_fn returns the op call.
 TABLE2_OPS = [
     (
         "adaptive_avg_pool2d",
@@ -111,6 +112,12 @@ TABLE2_OPS = [
         lambda x: relax.op.add(x, relax.const(np.zeros((1, 4, 1, 1), _F32))),
     ),
     (
+        "avg_pool3d",
+        MappingType.kManyToMany,
+        [_tensor([1, 4, 8, 8, 8])],
+        lambda x: relax.op.nn.avg_pool3d(x, pool_size=(2, 2, 2)),
+    ),
+    (
         "concatenate",
         MappingType.kOneToOne,
         [_tensor([1, 4, 8, 8]), _tensor([1, 4, 8, 8])],
@@ -122,11 +129,31 @@ TABLE2_OPS = [
         [_tensor([1, 4, 8, 8]), _tensor([4, 4, 3, 3])],
         relax.op.nn.conv2d,
     ),
+    # unet's up-sampling path. Default kernel_layout for conv2d_transpose is IOHW.
+    (
+        "conv2d_transpose",
+        MappingType.kManyToMany,
+        [_tensor([1, 4, 8, 8]), _tensor([4, 4, 3, 3])],
+        relax.op.nn.conv2d_transpose,
+    ),
+    (
+        "conv3d",
+        MappingType.kManyToMany,
+        [_tensor([1, 4, 8, 8, 8]), _tensor([4, 4, 3, 3, 3])],
+        relax.op.nn.conv3d,
+    ),
     (
         "divide (broadcast)",
         MappingType.kOneToMany,
         [_tensor([1, 4, 8, 8]), _tensor([1, 4, 1, 1])],
         relax.op.divide,
+    ),
+    # relax.nn.leakyrelu legalizes to topi.nn.leaky_relu -> PrimFunc "leaky_relu".
+    (
+        "leaky_relu",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        relax.op.nn.leakyrelu,
     ),
     (
         "matmul",
@@ -139,6 +166,12 @@ TABLE2_OPS = [
         MappingType.kManyToMany,
         [_tensor([1, 4, 8, 8])],
         lambda x: relax.op.nn.max_pool2d(x, pool_size=(2, 2)),
+    ),
+    (
+        "max_pool3d",
+        MappingType.kManyToMany,
+        [_tensor([1, 4, 8, 8, 8])],
+        lambda x: relax.op.nn.max_pool3d(x, pool_size=(2, 2, 2)),
     ),
     (
         "mean",
@@ -170,11 +203,24 @@ TABLE2_OPS = [
         [_tensor([10, 20])],
         lambda x: relax.op.reshape(x, [20, 10]),
     ),
+    # yolov4's upsample. One input element feeds several output elements.
+    (
+        "resize2d",
+        MappingType.kOneToMany,
+        [_tensor([1, 4, 8, 8])],
+        lambda x: relax.op.image.resize2d(x, size=(16, 16)),
+    ),
     (
         "silu",
         MappingType.kOneToOne,
         [_tensor([1, 4, 8, 8])],
         relax.op.nn.silu,
+    ),
+    (
+        "softplus",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        relax.op.nn.softplus,
     ),
     (
         "subtract (broadcast)",
@@ -193,6 +239,19 @@ TABLE2_OPS = [
         MappingType.kOneToOne,
         [_tensor([10, 20])],
         relax.op.sigmoid,
+    ),
+    (
+        "tir_tanh",
+        MappingType.kOneToOne,
+        [_tensor([10, 20])],
+        relax.op.tanh,
+    ),
+    # relax.permute_dims legalizes to topi.transpose -> PrimFunc "transpose".
+    (
+        "transpose",
+        MappingType.kShuffle,
+        [_tensor([10, 20])],
+        lambda x: relax.op.permute_dims(x, axes=[1, 0]),
     ),
 ]
 
