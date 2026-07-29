@@ -931,12 +931,19 @@ class OperatorFusor : public ExprMutator {
       }
 
       // Step c. Update the mapping used for the remapping of the binding variables.
-      if (IsTupleOutput(func) && !pending_tuple_get.empty()) {
+      // Note the lookup must be scoped to *this* group: `pending_tuple_get` accumulates
+      // across every group in the block, so testing the whole map for emptiness would
+      // send a tuple-output group with no pending entries of its own down the
+      // TupleGetItem branch, where it emits nothing and -- fatally -- never records
+      // `var_remap_` for its own tuple variable, leaving its consumers referring to a
+      // now-unbound DataflowVar.
+      auto it_pending = pending_tuple_get.find(group);
+      if (IsTupleOutput(func) && it_pending != pending_tuple_get.end()) {
         // If the output is a tuple, attach TupleGetItem to all tuple elements, and
         // remap variables approriately.
         // The variables that need to be remapped and the corresponding tuple indices are
         // available in pending_tuple_get and tuple_get_indices_ respectively.
-        for (const auto& var : pending_tuple_get[group]) {
+        for (const auto& var : it_pending->second) {
           auto tuple_get = TupleGetItem(new_var, tuple_get_indices_[var.get()]);
           var_remap_[var->vid] = builder_->Emit(tuple_get);
         }
