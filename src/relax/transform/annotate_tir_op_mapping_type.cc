@@ -96,10 +96,9 @@ const std::unordered_map<std::string, MappingType>& Table2Lookup() {
       {"max_pool2d", kManyToMany},
       {"max_pool3d", kManyToMany},
       {"mean", kManyToMany},
-      // pad/split/squeeze/strided_slice (ONNX Pad/Split/Squeeze/Slice) are all pure
-      // data movement: every output element is a copy of at most one input element at
-      // a remapped index, with no value change -- Table 2's Reorganize row, same as
-      // reshape.
+      // Pad is not listed in Table 2, but it is pure data movement: every output
+      // element is a copy of at most one input element at a remapped index (or a
+      // constant), with no value change -- Table 2's Reorganize row, same as reshape.
       {"pad", kReorganize},
       {"relu", kOneToOne},
       {"reshape", kReorganize},
@@ -113,13 +112,20 @@ const std::unordered_map<std::string, MappingType>& Table2Lookup() {
       // softplus is not listed in Table 2, but softplus(x) = log(1 + exp(beta*x)) / beta
       // reads each input element exactly once at the same position -- One-to-One.
       {"softplus", kOneToOne},
-      {"split", kReorganize},
+      // Split: Table 2 lists ONNX Split in the One-to-One row, not Reorganize. Each
+      // output element is the input element at the same position within its slice, so
+      // the index map is an offset shift rather than a rank/layout change.
+      {"split", kOneToOne},
+      // Squeeze is in Table 2's Reorganize row -- it changes the operand's rank.
       {"squeeze", kReorganize},
       // stack has no single ONNX counterpart (it is Unsqueeze + Concat); like
       // concatenate it copies each input element to one output position without
       // changing its value, so it follows concatenate's One-to-One verdict.
       {"stack", kOneToOne},
-      {"strided_slice", kReorganize},
+      // relax.strided_slice is ONNX Slice, which Table 2 lists in the One-to-One row
+      // (same cell as Split), not Reorganize: the output keeps the input's rank and
+      // layout, each element being the input element at a strided/offset index.
+      {"strided_slice", kOneToOne},
       // ReduceSum, same row as Table 2's Reduce -- every output element reads a whole
       // slice of the input.
       {"sum", kManyToMany},

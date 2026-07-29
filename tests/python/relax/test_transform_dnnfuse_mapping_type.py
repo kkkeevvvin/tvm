@@ -303,7 +303,7 @@ TABLE2_OPS = [
     ),
     (
         "split",
-        MappingType.kReorganize,
+        MappingType.kOneToOne,
         [_tensor([10, 20])],
         lambda x: relax.op.split(x, 2, axis=1),
     ),
@@ -321,7 +321,7 @@ TABLE2_OPS = [
     ),
     (
         "strided_slice",
-        MappingType.kReorganize,
+        MappingType.kOneToOne,
         [_tensor([10, 20])],
         lambda x: relax.op.strided_slice(x, axes=[1], begin=[0], end=[10]),
     ),
