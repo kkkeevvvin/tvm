@@ -470,9 +470,8 @@ double TimePrimFunc(const tir::PrimFunc& func, const std::string& record_name, i
   return TimeKernel(kernel.value(), args.value(), dev);
 }
 
-// Find the call_tir Call bound to `var` in any relax function of `mod`.
-ffi::Optional<Call> FindCallTIR(const IRModule& mod, const Object* var) {
-  static const Op& call_tir_op = Op::Get("relax.call_tir");
+// Find the value bound to `var` in any relax function of `mod`.
+ffi::Optional<Expr> FindBindingValue(const IRModule& mod, const Object* var) {
   for (const auto& kv : mod->functions) {
     const auto* func = kv.second.as<FunctionNode>();
     if (func == nullptr) continue;
@@ -480,11 +479,7 @@ ffi::Optional<Call> FindCallTIR(const IRModule& mod, const Object* var) {
       for (const Binding& binding : block->bindings) {
         const auto* vb = binding.as<VarBindingNode>();
         if (vb == nullptr || vb->var.get() != var) continue;
-        const auto* call = vb->value.as<CallNode>();
-        if (call != nullptr && call->op.same_as(call_tir_op)) {
-          return ffi::GetRef<Call>(call);
-        }
-        return std::nullopt;
+        return vb->value;
       }
     }
   }
@@ -498,20 +493,30 @@ ffi::Optional<Call> FindCallTIR(const IRModule& mod, const Object* var) {
 // is wired var-to-var (the internal edges), while every other input -- including
 // constants -- becomes a tensor param, so the kernel is self-contained. Each
 // node output not consumed inside the set becomes a function output (a single
-// var, or a Tuple if several). Returns nullopt if any node lacks a call_tir
-// binding.
+// var, or a Tuple if several).
+//
+// A block may also contain TupleGetItem nodes -- a multi-output op like split
+// reaches its consumers only through one, and RunDNNFuse fuses through them
+// (they carry no computation). They are re-emitted as TupleGetItem when the
+// tuple's producer is in the block; when it is not, the selected tensor becomes
+// a plain param, which keeps the block's params tensors rather than tuples.
+//
+// Returns nullopt if any node is neither a call_tir nor a TupleGetItem binding.
 ffi::Optional<Function> MakeFusedBlockFunc(
     BlockBuilder bb, const IRModule& mod,
     const std::vector<const IndexedForwardGraph::Node*>& nodes) {
   static const Op& call_tir_op = Op::Get("relax.call_tir");
 
-  // Resolve every node's call_tir up front so we can bail before mutating `bb`.
-  std::vector<Call> calls;
-  calls.reserve(nodes.size());
+  // Resolve every node's binding up front so we can bail before mutating `bb`.
+  std::vector<Expr> values;
+  values.reserve(nodes.size());
   for (const auto* n : nodes) {
-    ffi::Optional<Call> c = FindCallTIR(mod, n->ref);
-    if (!c) return std::nullopt;
-    calls.push_back(c.value());
+    ffi::Optional<Expr> value = FindBindingValue(mod, n->ref);
+    if (!value) return std::nullopt;
+    const auto* call = value.value().as<CallNode>();
+    bool is_call_tir = call != nullptr && call->op.same_as(call_tir_op);
+    if (!is_call_tir && !value.value()->IsInstance<TupleGetItemNode>()) return std::nullopt;
+    values.push_back(value.value());
   }
 
   ffi::Array<Var> params;
@@ -519,9 +524,29 @@ ffi::Optional<Function> MakeFusedBlockFunc(
   std::unordered_map<const Object*, Var> produced;  // node->ref -> emitted var
   std::unordered_set<const Object*> consumed;        // outputs used within the set
 
+  // An input that no node in the set produces: a fresh tensor param.
+  auto make_param = [&](const StructInfo& sinfo) {
+    Var param("p" + std::to_string(pidx++), sinfo);
+    params.push_back(param);
+    return param;
+  };
+
   bb->BeginDataflowBlock();
   for (size_t i = 0; i < nodes.size(); ++i) {
-    const Call& call = calls[i];
+    if (const auto* tgi = values[i].as<TupleGetItemNode>()) {
+      auto it = produced.find(tgi->tuple.get());
+      if (it != produced.end()) {
+        consumed.insert(tgi->tuple.get());
+        produced[nodes[i]->ref] = bb->Emit(TupleGetItem(it->second, tgi->index));
+      } else {
+        // The tuple comes from outside the block; take the selected element
+        // itself as the param, so the fused kernel's signature stays flat.
+        produced[nodes[i]->ref] =
+            make_param(GetStructInfo(ffi::GetRef<Var>(static_cast<const VarNode*>(nodes[i]->ref))));
+      }
+      continue;
+    }
+    const Call call = Downcast<Call>(values[i]);
     auto pf = Downcast<tir::PrimFunc>(mod->Lookup(Downcast<GlobalVar>(call->args[0])));
     GlobalVar callee = bb->AddFunction(pf, "k" + std::to_string(i));
     ffi::Array<Expr> args;
@@ -531,9 +556,7 @@ ffi::Optional<Function> MakeFusedBlockFunc(
         consumed.insert(a.get());  // internal edge: another node's output feeds this op
         args.push_back(it->second);
       } else {
-        Var param("p" + std::to_string(pidx++), GetStructInfo(a));
-        params.push_back(param);
-        args.push_back(param);
+        args.push_back(make_param(GetStructInfo(a)));
       }
     }
     Call inner(call_tir_op, {callee, Tuple(args)}, Attrs(), call->sinfo_args);
