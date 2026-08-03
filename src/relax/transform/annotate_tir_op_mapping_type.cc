@@ -50,9 +50,10 @@ namespace {
 
 // Table 2 (DNNFusion, \S3.1), restricted to the op set surveyed in issue #6 t1 (all_6
 // models), the ops issue #37 found uncovered on the paper_6 models (vgg16, unet,
-// c3d, s3d, mobilenet_v1_ssd, yolov4), and the ops issue #38 found uncovered on the
+// c3d, s3d, mobilenet_v1_ssd, yolov4), the ops issue #38 found uncovered on the
 // paleo models (effv2_s, regnetY, rs_rs50, cnxtv2, vit_L, vit_H, deit3, beit,
-// swinv2, eva02) -- all these surveys run the model through
+// swinv2, eva02), and the two ops GPT-2 (issue #19's transformer entry) left
+// uncovered, take and where -- all these surveys run the model through
 // DecomposeOpsForInference -> LegalizeOps -> AnnotateTIROpPattern -> FoldConstant.
 // Keyed on the call_tir callee's GlobalVar name with the numeric dedup suffix stripped.
 // add/subtract/multiply/divide/maximum/power are deliberately absent -- see
@@ -129,6 +130,15 @@ const std::unordered_map<std::string, MappingType>& Table2Lookup() {
       // ReduceSum, same row as Table 2's Reduce -- every output element reads a whole
       // slice of the input.
       {"sum", kManyToMany},
+      // relax.take is ONNX Gather, which Table 2 does not list. It has two mapping
+      // types to reconcile, and \S3.1's "decided by the more complex mapping type"
+      // rule picks between them. Along the indices operand -- GPT-2's activation
+      // edge, since the table being gathered is the embedding weight -- one index
+      // element produces a whole row of the output (here one id -> 1600 embedding
+      // values), the One-to-Many form. Along the gathered table it is a plain copy
+      // at a remapped index. One-to-Many is the more complex of the two, so it wins
+      // regardless of which operand carries activations.
+      {"take", kOneToMany},
       {"tir_abs", kOneToOne},
       {"tir_clip", kOneToOne},
       {"tir_negative", kOneToOne},
@@ -148,9 +158,16 @@ const std::unordered_map<std::string, MappingType>& Table2Lookup() {
 // operand shapes at the call site; we do the same by comparing each input buffer's
 // shape against the output buffer's shape, ignoring weight operands (see ConstArgMask
 // below).
+//
+// where (ONNX Where, opset 9, likewise unlisted in Table 2) belongs here for the same
+// reason rather than in the table above: it is elementwise select(cond, x, y) over
+// multidirectionally broadcast operands, so its mapping type is a question about the
+// call site's shapes, not about the op. GPT-2's causal mask is the motivating case --
+// the (1, 1, s, s) mask and the scalar fill are both weights, leaving the (1, h, s, s)
+// scores as the only activation operand, so the select comes out One-to-One.
 const std::unordered_set<std::string>& BroadcastCapableOps() {
-  static const std::unordered_set<std::string> ops = {"add",    "subtract", "multiply",
-                                                      "divide", "maximum",  "power"};
+  static const std::unordered_set<std::string> ops = {"add",     "subtract", "multiply", "divide",
+                                                      "maximum", "power",    "where"};
   return ops;
 }
 
@@ -251,7 +268,7 @@ std::optional<std::vector<int64_t>> StaticShape(const tir::Buffer& buffer) {
   return shape;
 }
 
-// Classifies a broadcast-capable binary elementwise PrimFunc as One-to-One (every input
+// Classifies a broadcast-capable elementwise PrimFunc as One-to-One (every input
 // buffer's shape matches the output buffer's shape) or One-to-Many (some input is
 // broadcast); falls back to kMappingOpaque if any buffer's shape is not statically known.
 // Assumes TVM's arg-list convention of inputs followed by the (sole) output buffer.

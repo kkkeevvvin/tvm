@@ -337,6 +337,14 @@ TABLE2_OPS = [
         [_tensor([10, 20])],
         lambda x: relax.op.sum(x, axis=1),
     ),
+    # ONNX Gather, unlisted in Table 2: One-to-Many, because one element of the
+    # indices operand produces a whole row of the output. GPT-2's token embedding.
+    (
+        "take",
+        MappingType.kOneToMany,
+        [_tensor([50257, 768]), _tensor([128], "int32")],
+        lambda x, idx: relax.op.take(x, idx, axis=0),
+    ),
     (
         "tir_abs",
         MappingType.kOneToOne,
@@ -379,6 +387,32 @@ TABLE2_OPS = [
         MappingType.kShuffle,
         [_tensor([10, 20])],
         lambda x: relax.op.permute_dims(x, axes=[1, 0]),
+    ),
+    # ONNX Where: elementwise select over multidirectionally broadcast operands,
+    # resolved by operand shape like add rather than by name.
+    (
+        "where (same-shape)",
+        MappingType.kOneToOne,
+        [_tensor([1, 4, 8, 8], "bool"), _tensor([1, 4, 8, 8]), _tensor([1, 4, 8, 8])],
+        relax.op.where,
+    ),
+    (
+        "where (broadcast)",
+        MappingType.kOneToMany,
+        [_tensor([1, 1, 8, 8], "bool"), _tensor([1, 4, 8, 8]), _tensor([1, 4, 8, 8])],
+        relax.op.where,
+    ),
+    # GPT-2's masked attention scores: the causal mask and the -inf fill are both
+    # weights, so only the scores are compared and the select stays One-to-One.
+    (
+        "where (weight mask and fill)",
+        MappingType.kOneToOne,
+        [_tensor([1, 4, 8, 8])],
+        lambda x: relax.op.where(
+            relax.const(np.ones((1, 1, 8, 8), "bool")),
+            x,
+            relax.const(np.float32(-3.4e38)),
+        ),
     ),
 ]
 
