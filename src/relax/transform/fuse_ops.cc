@@ -286,13 +286,23 @@ class GraphCreator : public ExprVisitor {
     ICHECK_NOTNULL(binding_var_node);
 
     auto pattern = OpPatternKind::kInjective;
+    // A TupleGetItem carries no computation: it selects one of a multi-output op's
+    // results. For RunDNNFuse it is the same kind of pure data reorganization as
+    // reshape/split, so classify it kReorganize (the mapping-type counterpart of
+    // the kInjective pattern above) rather than leaving it at the node default of
+    // kMappingOpaque, which breaks every chain at a multi-output op -- GPT-2's
+    // attention, where split's three results reach reshape/transpose only through
+    // a TupleGetItem, is the motivating case.
+    auto mapping_type = MappingType::kReorganize;
     if (input_params_.count(tuple_item->tuple.as<VarNode>())) {
       // TupleGetItem for fetching the parameter from the packed param tuple is treated as opaque
       // and won't be fused. This prevents the usage of packed param tuple changes the order of the
       // fusion result as the function usually begins with fetching the parameters.
       pattern = OpPatternKind::kOpaque;
+      mapping_type = MappingType::kMappingOpaque;
     }
     SetNodePattern(binding_var_node, pattern);
+    SetNodeMappingType(binding_var_node, mapping_type);
     VisitLeaf(tuple_item->tuple, binding_var_node, pattern);
   }
 
