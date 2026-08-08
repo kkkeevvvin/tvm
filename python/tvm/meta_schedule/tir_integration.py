@@ -296,6 +296,16 @@ def _ms_schedule_primfunc(
     PrimFunc's structural hash so structurally-identical kernels share a
     database.
 
+    Setting ``$DNNF_PROFILER_REUSE=1`` turns that persistence into a cache:
+    when this kernel's work directory already holds a non-empty
+    ``database_tuning_record.json``, its best record is applied directly and no
+    trials are run. Point ``$DNNF_PROFILER_WORKDIR`` at an earlier run's
+    ``profiler_workdir`` to replay that run's FuseProfit verdicts exactly --
+    the oracle is itself a tuning search, so without this a re-run can reach a
+    different fusion decision (and hence a different task set) than the outer
+    MetaSchedule database was tuned against. Kernels with no cached record fall
+    through to tuning as usual, so a partial cache is safe.
+
     Parameters
     ----------
     func : tir.PrimFunc
@@ -314,6 +324,7 @@ def _ms_schedule_primfunc(
         The tuned PrimFunc, or ``None`` if tuning found no schedule.
     """
     import os  # pylint: disable=import-outside-toplevel
+    import sys  # pylint: disable=import-outside-toplevel
 
     if isinstance(max_trials, IntImm):
         max_trials = int(max_trials)
@@ -321,6 +332,23 @@ def _ms_schedule_primfunc(
     subdir = str(record_name) if record_name else str(ir.structural_hash(func))
     work_dir = os.path.join(base_dir, subdir)
     os.makedirs(work_dir, exist_ok=True)
+
+    if os.environ.get("DNNF_PROFILER_REUSE", "0").lower() not in ("0", "", "false"):
+        record_path = os.path.join(work_dir, "database_tuning_record.json")
+        # A zero-length record file means a previous run committed the workload
+        # but measured nothing, which query_schedule cannot answer -- treat it
+        # as a cache miss and tune.
+        if os.path.isfile(record_path) and os.path.getsize(record_path) > 0:
+            cached = Database.create("json", work_dir=work_dir)
+            sch = compile_tir(cached, func, target)
+            # A miss here means the cached workload no longer matches this
+            # PrimFunc structurally (e.g. TIR lowering changed since), so the
+            # replay is not faithful -- say so rather than silently re-tuning.
+            print(f"[dnnf-profiler-reuse] {'hit ' if sch else 'MISS'} {subdir}",
+                  file=sys.stderr, flush=True)
+            if sch is not None:
+                return sch.mod["main"]
+
     database = tune_tir(
         func,
         target,
